@@ -1,26 +1,274 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --sc-blue: #3b6cff;
+  --sc-purple: #7b4dff;
+  --sc-accent: #a78bfa;
+  --sc-bg0: #070b1a;
+  --sc-bg1: #12163a;
+  --sc-surface: rgba(22, 28, 58, 0.72);
+  --sc-surface-solid: #161c3a;
+  --sc-input: #0d1228;
+  --sc-border: rgba(167, 139, 250, 0.28);
+  --sc-text: #eef0ff;
+  --sc-muted: #9aa3c7;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Manrope", system-ui, sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+* {
+  box-sizing: border-box;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  min-height: 100%;
+  color: var(--sc-text);
+  font-family: var(--font-body), system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(59, 108, 255, 0.35), transparent 60%),
+    radial-gradient(900px 500px at 90% 0%, rgba(123, 77, 255, 0.32), transparent 55%),
+    linear-gradient(165deg, var(--sc-bg0), var(--sc-bg1) 45%, #0a0f24);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.sc-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.5rem;
+  border-bottom: 1px solid var(--sc-border);
+  background: rgba(8, 12, 28, 0.65);
+  backdrop-filter: blur(10px);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.sc-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.sc-logo {
+  border-radius: 10px;
+}
+
+.sc-brand-text {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, #8ec5ff, #c4b5fd);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.sc-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.92rem;
+}
+
+.sc-nav a {
+  color: var(--sc-muted);
+}
+
+.sc-nav a.active,
+.sc-nav a:hover {
+  color: var(--sc-accent);
+}
+
+.sc-signout {
+  background: transparent;
+  border: 1px solid var(--sc-border);
+  color: var(--sc-muted);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.sc-signout:hover {
+  color: var(--sc-text);
+  border-color: var(--sc-accent);
+}
+
+.sc-main {
+  flex: 1;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+
+.sc-auth-card {
+  width: 100%;
+  max-width: 420px;
+  margin: 4rem auto;
+  padding: 2rem;
+  background: var(--sc-surface);
+  border: 1px solid var(--sc-border);
+  border-radius: 16px;
+}
+
+.sc-auth-card h1 {
+  font-family: var(--font-display), Georgia, serif;
+  margin: 0 0 0.35rem;
+}
+
+.sc-auth-card p {
+  color: var(--sc-muted);
+  margin-top: 0;
+}
+
+.sc-auth-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.sc-auth-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--sc-muted);
+}
+
+.sc-auth-card input {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--sc-border);
+  background: var(--sc-input);
+  color: var(--sc-text);
+}
+
+.sc-landing {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+  text-align: center;
+}
+
+.sc-landing-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  min-height: 70vh;
+  justify-content: center;
+}
+
+.sc-landing h1 {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  margin: 0;
+  background: linear-gradient(135deg, #8ec5ff, #c4b5fd 55%, #fff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.sc-landing .tagline {
+  color: var(--sc-muted);
+  max-width: 34rem;
+  font-size: 1.1rem;
+}
+
+.sc-cta-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 0.5rem;
+}
+
+.sc-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.7rem 1.25rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.sc-cta-primary {
+  background: linear-gradient(135deg, var(--sc-blue), var(--sc-purple));
+  color: #fff;
+}
+
+.sc-cta-ghost {
+  border: 1px solid var(--sc-border);
+  color: var(--sc-text);
+}
+
+.settings-table-wrap {
+  overflow-x: auto;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 0.4rem;
+  border-bottom: 1px solid var(--sc-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.settings-table th {
+  color: var(--sc-accent);
+}
+
+.settings-table input {
+  width: 100%;
+  min-width: 4rem;
+  padding: 0.35rem;
+  border-radius: 6px;
+  border: 1px solid var(--sc-border);
+  background: var(--sc-input);
+  color: var(--sc-text);
+}
+
+.billing-card {
+  max-width: 520px;
+  margin: 2rem auto;
+  padding: 2rem;
+  background: var(--sc-surface);
+  border: 1px solid var(--sc-border);
+  border-radius: 16px;
+}
+
+.billing-card h1 {
+  font-family: var(--font-display), Georgia, serif;
+  margin-top: 0;
+}
+
+.billing-price {
+  font-size: 2rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--sc-blue), var(--sc-purple));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }

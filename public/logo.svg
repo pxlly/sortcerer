@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Sortcerer">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b6cff"/>
+      <stop offset="100%" stop-color="#7b4dff"/>
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="60" fill="#0b1020"/>
+  <path d="M64 18 L92 58 H36 Z" fill="url(#g)"/>
+  <ellipse cx="64" cy="58" rx="34" ry="8" fill="#5b3fd4"/>
+  <circle cx="64" cy="34" r="4" fill="#fbbf24"/>
+  <path d="M40 70 Q36 78 42 86" stroke="#e8e0ff" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path d="M88 70 Q92 78 86 86" stroke="#e8e0ff" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <rect x="48" y="78" width="14" height="20" rx="2" fill="#fff" stroke="#3b6cff" transform="rotate(-12 55 88)"/>
+  <rect x="62" y="76" width="14" height="20" rx="2" fill="#fff" stroke="#7b4dff" transform="rotate(8 69 86)"/>
+  <rect x="74" y="80" width="14" height="20" rx="2" fill="#fff" stroke="#a78bfa" transform="rotate(18 81 90)"/>
+</svg>
