@@ -8,8 +8,7 @@ export default function HomePage() {
         <Image src="/logo.png" alt="Sortcerer logo" width={120} height={120} priority />
         <h1>Sortcerer</h1>
         <p className="tagline">
-          Order Hub for Amazon FBM — convert unshipped orders, pack boxes, enrich weights with Keepa,
-          and print label headers that fit long titles.
+          Automation solutions for E-commerce brands
         </p>
         <div className="sc-cta-row">
           <Link href="/signup" className="sc-cta sc-cta-primary">
