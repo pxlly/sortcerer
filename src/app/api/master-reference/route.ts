@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { formatDbError } from '@/lib/supabase/dbErrors';
+import { capMaxQtyByWeight } from '@/lib/packing';
 
 export type MasterRefRow = {
   id?: string;
@@ -69,15 +70,23 @@ export async function POST(request: Request) {
     const asin = String(r.asin || '').trim().toUpperCase();
     const sku = String(r.sku || '').trim();
     if (!asin || !sku) continue;
+    const weightLb =
+      r.weight_lb == null || r.weight_lb === ('' as unknown) ? null : Number(r.weight_lb);
+    const requestedMaxQty =
+      r.max_qty_per_box == null || r.max_qty_per_box === ('' as unknown)
+        ? null
+        : Math.max(1, parseInt(String(r.max_qty_per_box), 10) || 1);
+    const maxQtyPerBox =
+      weightLb != null && requestedMaxQty != null
+        ? capMaxQtyByWeight(requestedMaxQty, weightLb)
+        : requestedMaxQty;
+
     byAsin.set(asin, {
       user_id: user.id,
       asin,
       sku,
-      weight_lb: r.weight_lb == null || r.weight_lb === ('' as unknown) ? null : Number(r.weight_lb),
-      max_qty_per_box:
-        r.max_qty_per_box == null || r.max_qty_per_box === ('' as unknown)
-          ? null
-          : Math.max(1, parseInt(String(r.max_qty_per_box), 10) || 1),
+      weight_lb: weightLb,
+      max_qty_per_box: maxQtyPerBox,
       product_name: r.product_name ? String(r.product_name).trim() : null,
       updated_at: now,
     });

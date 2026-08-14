@@ -3,6 +3,7 @@
  */
 
 import { normalizeState, normalizeZip } from '@/lib/addressNormalize';
+import { capMaxQtyByWeight } from '@/lib/packing';
 
 export interface MasterRefEntry {
   sku: string;
@@ -129,7 +130,7 @@ export function expandOrderToCsvLines(
   }
 ): CsvOutputRow[] {
   const unitWeight = ref.weight;
-  const maxPerBox = Math.max(1, ref.maxQtyPerBox);
+  const maxPerBox = capMaxQtyByWeight(ref.maxQtyPerBox, unitWeight);
   const productName = (ref.productName && ref.productName.trim()) || order.productName || ref.sku;
   const lines: CsvOutputRow[] = [];
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { parseMasterReferenceCsv } from '@/lib/parseMasterReferenceCsv';
 import { parseCatalogInventoryText } from '@/lib/parseCatalogPdf';
+import { capMaxQtyByWeight } from '@/lib/packing';
 
 type Row = {
   id?: string;
@@ -187,29 +188,56 @@ export default function SettingsMasterRef() {
   };
 
   const enrichMissing = async () => {
-    const need = rows.filter((r) => r.weight_lb == null || r.max_qty_per_box == null).map((r) => r.asin);
-    if (need.length === 0) {
-      showToast('All rows already have weight and max qty.');
-      return;
-    }
-
     setKeepaBusy(true);
     setError(null);
+
+    const corrections: Row[] = [];
+    const validatedRows = rows.map((row) => {
+      if (row.weight_lb == null || row.max_qty_per_box == null) return row;
+      const cappedMax = capMaxQtyByWeight(row.max_qty_per_box, row.weight_lb);
+      if (cappedMax === row.max_qty_per_box) return row;
+      const corrected = { ...row, max_qty_per_box: cappedMax };
+      corrections.push(corrected);
+      return corrected;
+    });
+    const need = validatedRows
+      .filter((row) => row.weight_lb == null || row.max_qty_per_box == null)
+      .map((row) => row.asin);
+
     setEnrichProgress({
       completed: 0,
       total: need.length,
       enriched: 0,
       failed: 0,
-      status: 'Starting API enrichment…',
+      status: 'Checking current values against the 40 lb box limit…',
     });
 
-    const sourceRows = new Map(rows.map((row) => [row.asin, row]));
+    const sourceRows = new Map(validatedRows.map((row) => [row.asin, row]));
     const queue = need.map((asin) => ({ asin, attempts: 0 }));
     let completed = 0;
     let enriched = 0;
     let failed = 0;
+    let finalStatus = 'Complete';
 
     try {
+      if (corrections.length > 0) {
+        await upsertRows(corrections, false);
+      }
+
+      if (need.length === 0) {
+        await load();
+        finalStatus =
+          corrections.length > 0
+            ? `Complete — corrected ${corrections.length} max/box value${corrections.length === 1 ? '' : 's'}`
+            : 'Complete — all values already pass';
+        showToast(
+          corrections.length > 0
+            ? `Validation complete: corrected ${corrections.length} max/box value${corrections.length === 1 ? '' : 's'} for the 40 lb limit.`
+            : 'All rows have complete values and pass the 40 lb limit.'
+        );
+        return;
+      }
+
       while (queue.length > 0) {
         const batch = queue.splice(0, ENRICH_BATCH_SIZE);
         setEnrichProgress({
@@ -260,15 +288,22 @@ export default function SettingsMasterRef() {
             continue;
           }
 
+          const nextWeight =
+            typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb;
+          const uncappedNextMax =
+            typeof result.maxQtyPerBox === 'number'
+              ? result.maxQtyPerBox
+              : existing.max_qty_per_box;
+          const nextMax =
+            nextWeight != null && uncappedNextMax != null
+              ? capMaxQtyByWeight(uncappedNextMax, nextWeight)
+              : uncappedNextMax;
+
           updates.push({
             asin: existing.asin,
             sku: existing.sku,
-            weight_lb:
-              typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb,
-            max_qty_per_box:
-              typeof result.maxQtyPerBox === 'number'
-                ? result.maxQtyPerBox
-                : existing.max_qty_per_box,
+            weight_lb: nextWeight,
+            max_qty_per_box: nextMax,
             product_name:
               typeof result.productName === 'string' && result.productName
                 ? result.productName
@@ -295,14 +330,18 @@ export default function SettingsMasterRef() {
       }
 
       await load();
-      showToast(`API enrichment complete: ${enriched} enriched${failed ? `, ${failed} unavailable` : ''}.`);
+      finalStatus = `Complete — ${enriched} enriched${corrections.length ? `, ${corrections.length} corrected` : ''}${failed ? `, ${failed} unavailable` : ''}`;
+      showToast(
+        `API enrichment complete: ${enriched} enriched${corrections.length ? `, ${corrections.length} corrected for 40 lb limit` : ''}${failed ? `, ${failed} unavailable` : ''}.`
+      );
     } catch (err: unknown) {
+      finalStatus = 'Stopped due to an error';
       setError(err instanceof Error ? err.message : 'API enrichment failed');
       await load();
     } finally {
       setKeepaBusy(false);
       setEnrichProgress((progress) =>
-        progress ? { ...progress, completed, enriched, failed, status: 'Complete' } : null
+        progress ? { ...progress, completed, enriched, failed, status: finalStatus } : null
       );
     }
   };
@@ -403,10 +442,12 @@ export default function SettingsMasterRef() {
           <div className="settings-enrich-progress" role="status" aria-live="polite">
             <div className="settings-enrich-progress-copy">
               <span>{enrichProgress.status}</span>
-              <span>
-                {enrichProgress.completed}/{enrichProgress.total} ({enrichProgress.enriched} enriched
-                {enrichProgress.failed ? `, ${enrichProgress.failed} unavailable` : ''})
-              </span>
+              {enrichProgress.total > 0 && (
+                <span>
+                  {enrichProgress.completed}/{enrichProgress.total} ({enrichProgress.enriched} enriched
+                  {enrichProgress.failed ? `, ${enrichProgress.failed} unavailable` : ''})
+                </span>
+              )}
             </div>
             <progress
               value={enrichProgress.completed}

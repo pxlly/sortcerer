@@ -21,6 +21,7 @@ import {
   type DefaultFromAddress,
 } from '@/lib/shippingStorage';
 import { normalizeState, normalizeZip } from '@/lib/addressNormalize';
+import { capMaxQtyByWeight } from '@/lib/packing';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import JSZip from 'jszip';
 import './OrderHub.css';
@@ -71,7 +72,7 @@ function dbRowToEntry(r: {
     sku: r.sku,
     asin: r.asin,
     weight: Number(r.weight_lb),
-    maxQtyPerBox: Number(r.max_qty_per_box),
+    maxQtyPerBox: capMaxQtyByWeight(Number(r.max_qty_per_box), Number(r.weight_lb)),
     productName: r.product_name ?? undefined,
   };
 }
@@ -1001,7 +1002,7 @@ function MissingSkuModal({
                 sku: modal.sku,
                 asin: asin || undefined,
                 weight: w,
-                maxQtyPerBox: m,
+                maxQtyPerBox: capMaxQtyByWeight(m, w),
                 productName: name,
               });
             }}

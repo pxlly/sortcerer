@@ -5,6 +5,8 @@ export const DEFAULT_BOX_IN = {
   height: 12.25,
 } as const;
 
+export const MAX_BOX_WEIGHT_LB = 40;
+
 const MM_TO_IN = 1 / 25.4;
 const G_TO_LB = 1 / 453.59237;
 
@@ -79,4 +81,15 @@ export function gramsToWeightLb(grams: number): number | { error: string } {
   }
   const lb = grams * G_TO_LB;
   return Math.max(1, Math.ceil(lb));
+}
+
+/**
+ * Enforce the 40 lb packed-box limit. A unit heavier than the limit still
+ * returns 1 because an order must contain at least one unit per box.
+ */
+export function capMaxQtyByWeight(maxQty: number, unitWeightLb: number): number {
+  const safeQty = Math.max(1, Math.floor(Number(maxQty) || 1));
+  if (!Number.isFinite(unitWeightLb) || unitWeightLb <= 0) return safeQty;
+  const weightLimitedQty = Math.max(1, Math.floor(MAX_BOX_WEIGHT_LB / unitWeightLb));
+  return Math.min(safeQty, weightLimitedQty);
 }

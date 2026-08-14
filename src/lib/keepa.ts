@@ -1,4 +1,4 @@
-import { gramsToWeightLb, maxUnitsPerBox } from './packing';
+import { capMaxQtyByWeight, gramsToWeightLb, maxUnitsPerBox } from './packing';
 
 export interface KeepaEnrichResult {
   asin: string;
@@ -69,6 +69,10 @@ export async function enrichAsinWithKeepa(asin: string): Promise<KeepaEnrichResu
   });
   if ('maxQtyPerBox' in packing) {
     result.maxQtyPerBox = packing.maxQtyPerBox;
+  }
+
+  if (result.weightLb != null && result.maxQtyPerBox != null) {
+    result.maxQtyPerBox = capMaxQtyByWeight(result.maxQtyPerBox, result.weightLb);
   }
 
   if (result.weightLb == null && result.maxQtyPerBox == null) {
