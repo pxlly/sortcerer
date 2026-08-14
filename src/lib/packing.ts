@@ -64,8 +64,9 @@ export function maxUnitsPerBox(
     }
   }
 
+  // Unfit in any orientation: still store 1 (not 0/null) for master reference.
   if (best < 1) {
-    return { error: 'Unit does not fit in the packing box in any orientation' };
+    return { maxQtyPerBox: 1, orientationUsed: bestOri };
   }
 
   return { maxQtyPerBox: best, orientationUsed: bestOri };
