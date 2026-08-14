@@ -51,11 +51,11 @@ create policy "Users can view own subscription"
 
 -- Service role updates subscriptions via postback (bypasses RLS)
 
--- Master reference: SKU is unique per user; multiple SKUs may share an ASIN.
+-- Master reference: SKU is unique per user; ASIN is optional and may repeat across SKUs.
 create table if not exists public.master_reference (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
-  asin text not null,
+  asin text,
   sku text not null,
   weight_lb numeric(10, 2),
   max_qty_per_box integer,
@@ -63,6 +63,10 @@ create table if not exists public.master_reference (
   updated_at timestamptz not null default now(),
   unique (user_id, sku)
 );
+
+-- Existing projects created with `asin text not null`: ASIN is optional now.
+alter table public.master_reference
+  alter column asin drop not null;
 
 -- Idempotent migration for databases created with unique (user_id, asin).
 -- If a user already has duplicate SKUs, retain the most recently updated row.

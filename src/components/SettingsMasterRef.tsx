@@ -7,7 +7,8 @@ import { capMaxQtyByWeight } from '@/lib/packing';
 
 type Row = {
   id?: string;
-  asin: string;
+  /** Optional: SKU is the identity. May be '' or null for rows without an ASIN. */
+  asin: string | null;
   sku: string;
   weight_lb: number | null;
   max_qty_per_box: number | null;
@@ -120,16 +121,16 @@ export default function SettingsMasterRef() {
       try {
         const result = parseMasterReferenceCsv(String(reader.result));
         const mapped: Row[] = result.rows
-          .filter((r) => r.asin)
+          .filter((r) => r.sku)
           .map((r) => ({
-            asin: r.asin!,
+            asin: r.asin ?? null,
             sku: r.sku,
             weight_lb: r.weight,
             max_qty_per_box: r.maxQtyPerBox,
             product_name: r.productName ?? null,
           }));
         if (mapped.length === 0) {
-          showToast('No rows with ASIN. ASIN is required for every SKU.');
+          showToast('No rows with a SKU. SKU is required for every row.');
           return;
         }
         const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
@@ -200,11 +201,12 @@ export default function SettingsMasterRef() {
       corrections.push(corrected);
       return corrected;
     });
+    // Enrichment is ASIN-driven; rows without an ASIN can only be filled in by hand.
     const need = [
       ...new Set(
         validatedRows
-          .filter((row) => row.weight_lb == null || row.max_qty_per_box == null)
-          .map((row) => row.asin)
+          .filter((row) => row.asin && (row.weight_lb == null || row.max_qty_per_box == null))
+          .map((row) => row.asin as string)
       ),
     ];
 
@@ -218,6 +220,7 @@ export default function SettingsMasterRef() {
 
     const sourceRows = new Map<string, Row[]>();
     for (const row of validatedRows) {
+      if (!row.asin) continue;
       const matches = sourceRows.get(row.asin) || [];
       matches.push(row);
       sourceRows.set(row.asin, matches);
@@ -361,7 +364,7 @@ export default function SettingsMasterRef() {
   const exportCsv = () => {
     const header = 'ASIN,SKU,WEIGHT,MAX QTY PER BOX,PRODUCT NAME';
     const body = rows.map((r) =>
-      [r.asin, r.sku, r.weight_lb ?? '', r.max_qty_per_box ?? '', r.product_name ?? '']
+      [r.asin ?? '', r.sku, r.weight_lb ?? '', r.max_qty_per_box ?? '', r.product_name ?? '']
         .map((v) => (String(v).includes(',') ? `"${String(v).replace(/"/g, '""')}"` : v))
         .join(',')
     );
@@ -399,8 +402,9 @@ export default function SettingsMasterRef() {
     <div className="settings-page">
       <h1 className="order-hub-title">Settings</h1>
       <p className="order-hub-min-orders-desc">
-        Master reference lives here (hidden from Order Hub). Each SKU is unique; multiple SKUs may
-        share an ASIN. Store name is optional and cannot verify Amazon account ownership.
+        Master reference lives here (hidden from Order Hub). Each SKU is unique; ASIN is optional
+        and multiple SKUs may share an ASIN. Store name is optional and cannot verify Amazon
+        account ownership.
       </p>
       {toast && (
         <div className="order-hub-toast" role="alert">
@@ -518,7 +522,7 @@ function EditableRow({
       </td>
       <td>
         <input
-          value={draft.asin}
+          value={draft.asin ?? ''}
           onChange={(e) => setDraft((d) => ({ ...d, asin: e.target.value.toUpperCase() }))}
         />
       </td>

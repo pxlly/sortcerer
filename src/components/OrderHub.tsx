@@ -119,7 +119,7 @@ function filterByMinOrders(
 }
 
 function dbRowToEntry(r: {
-  asin: string;
+  asin: string | null;
   sku: string;
   weight_lb: number | null;
   max_qty_per_box: number | null;
@@ -128,22 +128,22 @@ function dbRowToEntry(r: {
   if (r.weight_lb == null || r.max_qty_per_box == null) return null;
   return {
     sku: r.sku,
-    asin: r.asin,
+    asin: r.asin || undefined,
     weight: Number(r.weight_lb),
     maxQtyPerBox: capMaxQtyByWeight(Number(r.max_qty_per_box), Number(r.weight_lb)),
     productName: r.product_name ?? undefined,
   };
 }
 
+/** ASIN is optional: SKU is the master reference identity. */
 async function persistMasterEntry(entry: MasterRefEntry) {
-  if (!entry.asin) throw new Error('ASIN is required to save master reference data');
   const res = await fetch('/api/master-reference', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       rows: [
         {
-          asin: entry.asin,
+          asin: entry.asin ?? '',
           sku: entry.sku,
           weight_lb: entry.weight,
           max_qty_per_box: entry.maxQtyPerBox,
@@ -235,7 +235,7 @@ export default function OrderHub() {
         const entries: MasterRefEntry[] = [];
         const map: Record<string, string> = {};
         for (const r of json.rows || []) {
-          map[r.sku.trim()] = r.asin;
+          if (r.asin) map[r.sku.trim()] = r.asin;
           const e = dbRowToEntry(r);
           if (e) entries.push(e);
         }
@@ -398,15 +398,20 @@ export default function OrderHub() {
             resolve: async (newRef) => {
               try {
                 await addToMasterRef(newRef);
-                refMap[newRef.sku.trim()] = newRef;
-                unknownResolved++;
-                allLines = allLines.concat(expandOrderToCsvLines(order, newRef, from));
-                index++;
-                setMissingSkuModal(null);
-                processNext();
               } catch (err: unknown) {
-                setApiError(err instanceof Error ? err.message : 'Failed to save master reference');
+                const message =
+                  err instanceof Error ? err.message : 'Failed to save master reference';
+                setApiError(message);
+                // Rethrow so the modal stays open and shows the failure inline.
+                throw new Error(message);
               }
+              setApiError(null);
+              refMap[newRef.sku.trim()] = newRef;
+              unknownResolved++;
+              allLines = allLines.concat(expandOrderToCsvLines(order, newRef, from));
+              index++;
+              setMissingSkuModal(null);
+              processNext();
             },
           });
           return;
@@ -1120,6 +1125,7 @@ export default function OrderHub() {
 
       {missingSkuModal && (
         <MissingSkuModal
+          key={missingSkuModal.sku}
           modal={missingSkuModal}
           onCancel={() => setMissingSkuModal(null)}
         />
@@ -1145,18 +1151,37 @@ function MissingSkuModal({
   const [maxQty, setMaxQty] = useState('1');
   const [name, setName] = useState(modal.productName);
   const [asin, setAsin] = useState(modal.asin || '');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError(null);
+    const w = Math.max(1, Math.ceil(parseFloat(weight) || 1));
+    const m = Math.max(1, parseInt(maxQty, 10) || 1);
+    try {
+      await modal.resolve({
+        sku: modal.sku,
+        asin: asin || undefined,
+        weight: w,
+        maxQtyPerBox: capMaxQtyByWeight(m, w),
+        productName: name,
+      });
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save master reference');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="order-hub-modal-overlay">
       <div className="order-hub-modal">
         <h4>Missing master data: {modal.sku}</h4>
         {modal.keepaMsg && <p className="order-hub-min-orders-desc">{modal.keepaMsg}</p>}
-        <label>ASIN</label>
-        <input
-          value={asin}
-          required
-          onChange={(e) => setAsin(e.target.value.trim().toUpperCase())}
-        />
+        {saveError && <div className="order-hub-error">{saveError}</div>}
+        <label>ASIN (optional)</label>
+        <input value={asin} onChange={(e) => setAsin(e.target.value.trim().toUpperCase())} />
         <label>Single-unit weight (lbs)</label>
         <input type="number" min={1} value={weight} onChange={(e) => setWeight(e.target.value)} />
         <label>Max units per box</label>
@@ -1164,26 +1189,16 @@ function MissingSkuModal({
         <label>Product name</label>
         <input value={name} onChange={(e) => setName(e.target.value)} />
         <div className="form-actions">
-          <button type="button" className="order-hub-btn" onClick={onCancel}>
+          <button type="button" className="order-hub-btn" onClick={onCancel} disabled={saving}>
             Cancel
           </button>
           <button
             type="button"
             className="order-hub-btn order-hub-btn-primary"
-            disabled={!asin}
-            onClick={() => {
-              const w = Math.max(1, Math.ceil(parseFloat(weight) || 1));
-              const m = Math.max(1, parseInt(maxQty, 10) || 1);
-              void modal.resolve({
-                sku: modal.sku,
-                asin: asin || undefined,
-                weight: w,
-                maxQtyPerBox: capMaxQtyByWeight(m, w),
-                productName: name,
-              });
-            }}
+            disabled={saving}
+            onClick={() => void save()}
           >
-            Save & continue
+            {saving ? 'Saving…' : 'Save & continue'}
           </button>
         </div>
       </div>
