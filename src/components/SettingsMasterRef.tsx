@@ -129,12 +129,12 @@ export default function SettingsMasterRef() {
             product_name: r.productName ?? null,
           }));
         if (mapped.length === 0) {
-          showToast('No rows with ASIN. ASIN is required (unique per account).');
+          showToast('No rows with ASIN. ASIN is required for every SKU.');
           return;
         }
         const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
         showToast(
-          `Imported ${n} rows.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate ASIN(s).` : ''}${result.rejected.length ? ` ${result.rejected.length} rejected.` : ''}`
+          `Imported ${n} rows.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate SKU(s).` : ''}${result.rejected.length ? ` ${result.rejected.length} rejected.` : ''}`
         );
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Import failed');
@@ -178,7 +178,7 @@ export default function SettingsMasterRef() {
       }));
       const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
       showToast(
-        `Catalog PDF: upserted ${n} SKUs.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate ASIN(s).` : ''} Use Keepa enrich for missing weight/max.`
+        `Catalog PDF: upserted ${n} SKUs.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate SKU(s).` : ''} Use Keepa enrich for missing weight/max.`
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'PDF parse failed');
@@ -200,9 +200,13 @@ export default function SettingsMasterRef() {
       corrections.push(corrected);
       return corrected;
     });
-    const need = validatedRows
-      .filter((row) => row.weight_lb == null || row.max_qty_per_box == null)
-      .map((row) => row.asin);
+    const need = [
+      ...new Set(
+        validatedRows
+          .filter((row) => row.weight_lb == null || row.max_qty_per_box == null)
+          .map((row) => row.asin)
+      ),
+    ];
 
     setEnrichProgress({
       completed: 0,
@@ -212,7 +216,12 @@ export default function SettingsMasterRef() {
       status: 'Checking current values against the 40 lb box limit…',
     });
 
-    const sourceRows = new Map(validatedRows.map((row) => [row.asin, row]));
+    const sourceRows = new Map<string, Row[]>();
+    for (const row of validatedRows) {
+      const matches = sourceRows.get(row.asin) || [];
+      matches.push(row);
+      sourceRows.set(row.asin, matches);
+    }
     const queue = need.map((asin) => ({ asin, attempts: 0 }));
     let completed = 0;
     let enriched = 0;
@@ -266,8 +275,8 @@ export default function SettingsMasterRef() {
 
         for (const item of batch) {
           const result = resultsByAsin.get(item.asin);
-          const existing = sourceRows.get(item.asin);
-          if (!result || !existing) {
+          const existingRows = sourceRows.get(item.asin);
+          if (!result || !existingRows?.length) {
             completed++;
             failed++;
             continue;
@@ -288,27 +297,30 @@ export default function SettingsMasterRef() {
             continue;
           }
 
-          const nextWeight =
-            typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb;
-          const uncappedNextMax =
-            typeof result.maxQtyPerBox === 'number'
-              ? result.maxQtyPerBox
-              : existing.max_qty_per_box;
-          const nextMax =
-            nextWeight != null && uncappedNextMax != null
-              ? capMaxQtyByWeight(uncappedNextMax, nextWeight)
-              : uncappedNextMax;
+          for (const existing of existingRows) {
+            if (existing.weight_lb != null && existing.max_qty_per_box != null) continue;
+            const nextWeight =
+              typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb;
+            const uncappedNextMax =
+              typeof result.maxQtyPerBox === 'number'
+                ? result.maxQtyPerBox
+                : existing.max_qty_per_box;
+            const nextMax =
+              nextWeight != null && uncappedNextMax != null
+                ? capMaxQtyByWeight(uncappedNextMax, nextWeight)
+                : uncappedNextMax;
 
-          updates.push({
-            asin: existing.asin,
-            sku: existing.sku,
-            weight_lb: nextWeight,
-            max_qty_per_box: nextMax,
-            product_name:
-              typeof result.productName === 'string' && result.productName
-                ? result.productName
-                : existing.product_name,
-          });
+            updates.push({
+              asin: existing.asin,
+              sku: existing.sku,
+              weight_lb: nextWeight,
+              max_qty_per_box: nextMax,
+              product_name:
+                typeof result.productName === 'string' && result.productName
+                  ? result.productName
+                  : existing.product_name,
+            });
+          }
           completed++;
           enriched++;
         }
@@ -371,8 +383,8 @@ export default function SettingsMasterRef() {
     }
   };
 
-  const remove = async (asin: string) => {
-    const res = await fetch(`/api/master-reference?asin=${encodeURIComponent(asin)}`, {
+  const remove = async (sku: string) => {
+    const res = await fetch(`/api/master-reference?sku=${encodeURIComponent(sku)}`, {
       method: 'DELETE',
     });
     if (!res.ok) {
@@ -387,8 +399,8 @@ export default function SettingsMasterRef() {
     <div className="settings-page">
       <h1 className="order-hub-title">Settings</h1>
       <p className="order-hub-min-orders-desc">
-        Master reference lives here (hidden from Order Hub). One Amazon store per account; ASIN is
-        unique per user.
+        Master reference lives here (hidden from Order Hub). Each SKU is unique; multiple SKUs may
+        share an ASIN. Store name is optional and cannot verify Amazon account ownership.
       </p>
       {toast && (
         <div className="order-hub-toast" role="alert">
@@ -473,7 +485,7 @@ export default function SettingsMasterRef() {
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <EditableRow key={r.asin} row={r} onSave={saveEdit} onDelete={remove} />
+                  <EditableRow key={r.sku} row={r} onSave={saveEdit} onDelete={remove} />
                 ))}
               </tbody>
             </table>
@@ -494,7 +506,7 @@ function EditableRow({
 }: {
   row: Row;
   onSave: (r: Row) => void;
-  onDelete: (asin: string) => void;
+  onDelete: (sku: string) => void;
 }) {
   const [draft, setDraft] = useState(row);
   useEffect(() => setDraft(row), [row]);
@@ -502,12 +514,14 @@ function EditableRow({
   return (
     <tr>
       <td>
+        {draft.sku}
+      </td>
+      <td>
         <input
-          value={draft.sku}
-          onChange={(e) => setDraft((d) => ({ ...d, sku: e.target.value }))}
+          value={draft.asin}
+          onChange={(e) => setDraft((d) => ({ ...d, asin: e.target.value.toUpperCase() }))}
         />
       </td>
-      <td>{draft.asin}</td>
       <td>
         <input
           type="number"
@@ -542,7 +556,7 @@ function EditableRow({
         <button type="button" className="order-hub-btn" onClick={() => onSave(draft)}>
           Save
         </button>{' '}
-        <button type="button" className="order-hub-btn" onClick={() => onDelete(row.asin)}>
+        <button type="button" className="order-hub-btn" onClick={() => onDelete(row.sku)}>
           Del
         </button>
       </td>

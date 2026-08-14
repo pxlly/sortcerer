@@ -53,9 +53,9 @@ On Vercel: add `ADMIN_EMAILS` with the exact email you use in Supabase Auth, the
 
 Schema highlights:
 
-- `profiles` — optional `store_name` (one store per account)
+- `profiles` — optional `store_name` label (not Amazon identity verification)
 - `subscriptions` — `active` / `locked`, `setup_paid`, `current_period_end`
-- `master_reference` — unique `(user_id, asin)`
+- `master_reference` — unique `(user_id, sku)`; an ASIN may have multiple SKUs
 
 New signups get a profile + **locked** subscription via trigger (`setup_paid = false`).
 

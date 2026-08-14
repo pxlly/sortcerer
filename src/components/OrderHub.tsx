@@ -136,8 +136,8 @@ function dbRowToEntry(r: {
 }
 
 async function persistMasterEntry(entry: MasterRefEntry) {
-  if (!entry.asin) return;
-  await fetch('/api/master-reference', {
+  if (!entry.asin) throw new Error('ASIN is required to save master reference data');
+  const res = await fetch('/api/master-reference', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -152,6 +152,10 @@ async function persistMasterEntry(entry: MasterRefEntry) {
       ],
     }),
   });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(json?.error || 'Failed to save master reference');
+  }
 }
 
 export default function OrderHub() {
@@ -182,7 +186,7 @@ export default function OrderHub() {
     productName: string;
     asin?: string;
     order: ParsedOrderRow;
-    resolve: (ref: MasterRefEntry) => void;
+    resolve: (ref: MasterRefEntry) => Promise<void>;
     keepaTried?: boolean;
     keepaMsg?: string;
   } | null>(null);
@@ -282,7 +286,8 @@ export default function OrderHub() {
     return out;
   }, []);
 
-  const addToMasterRef = useCallback((entry: MasterRefEntry) => {
+  const addToMasterRef = useCallback(async (entry: MasterRefEntry) => {
+    await persistMasterEntry(entry);
     setMasterRef((prev) => {
       const next = prev.filter((e) => e.sku !== entry.sku);
       next.push(entry);
@@ -292,7 +297,6 @@ export default function OrderHub() {
     if (entry.asin) {
       setAsinBySku((p) => ({ ...p, [entry.sku.trim()]: entry.asin! }));
     }
-    void persistMasterEntry(entry);
   }, []);
 
   const tryKeepaEnrich = async (
@@ -369,13 +373,17 @@ export default function OrderHub() {
           const asin = asinBySku[order.sku.trim()];
           const enriched = await tryKeepaEnrich(order.sku, order.productName, asin);
           if (enriched) {
-            refMap[enriched.sku.trim()] = enriched;
-            addToMasterRef(enriched);
-            unknownResolved++;
-            allLines = allLines.concat(expandOrderToCsvLines(order, enriched, from));
-            index++;
-            processNext();
-            return;
+            try {
+              await addToMasterRef(enriched);
+              refMap[enriched.sku.trim()] = enriched;
+              unknownResolved++;
+              allLines = allLines.concat(expandOrderToCsvLines(order, enriched, from));
+              index++;
+              processNext();
+              return;
+            } catch (err: unknown) {
+              setApiError(err instanceof Error ? err.message : 'Failed to save master reference');
+            }
           }
 
           setMissingSkuModal({
@@ -387,14 +395,18 @@ export default function OrderHub() {
             keepaMsg: asin
               ? 'Keepa could not fill weight/max qty (missing dims or API). Enter manually.'
               : 'No ASIN on file for this SKU. Add ASIN in Settings or enter weight/max manually.',
-            resolve: (newRef) => {
-              refMap[newRef.sku.trim()] = newRef;
-              addToMasterRef(newRef);
-              unknownResolved++;
-              allLines = allLines.concat(expandOrderToCsvLines(order, newRef, from));
-              index++;
-              setMissingSkuModal(null);
-              processNext();
+            resolve: async (newRef) => {
+              try {
+                await addToMasterRef(newRef);
+                refMap[newRef.sku.trim()] = newRef;
+                unknownResolved++;
+                allLines = allLines.concat(expandOrderToCsvLines(order, newRef, from));
+                index++;
+                setMissingSkuModal(null);
+                processNext();
+              } catch (err: unknown) {
+                setApiError(err instanceof Error ? err.message : 'Failed to save master reference');
+              }
             },
           });
           return;
@@ -1124,7 +1136,7 @@ function MissingSkuModal({
     sku: string;
     productName: string;
     asin?: string;
-    resolve: (ref: MasterRefEntry) => void;
+    resolve: (ref: MasterRefEntry) => Promise<void>;
     keepaMsg?: string;
   };
   onCancel: () => void;
@@ -1140,7 +1152,11 @@ function MissingSkuModal({
         <h4>Missing master data: {modal.sku}</h4>
         {modal.keepaMsg && <p className="order-hub-min-orders-desc">{modal.keepaMsg}</p>}
         <label>ASIN</label>
-        <input value={asin} onChange={(e) => setAsin(e.target.value.trim().toUpperCase())} />
+        <input
+          value={asin}
+          required
+          onChange={(e) => setAsin(e.target.value.trim().toUpperCase())}
+        />
         <label>Single-unit weight (lbs)</label>
         <input type="number" min={1} value={weight} onChange={(e) => setWeight(e.target.value)} />
         <label>Max units per box</label>
@@ -1154,10 +1170,11 @@ function MissingSkuModal({
           <button
             type="button"
             className="order-hub-btn order-hub-btn-primary"
+            disabled={!asin}
             onClick={() => {
               const w = Math.max(1, Math.ceil(parseFloat(weight) || 1));
               const m = Math.max(1, parseInt(maxQty, 10) || 1);
-              modal.resolve({
+              void modal.resolve({
                 sku: modal.sku,
                 asin: asin || undefined,
                 weight: w,

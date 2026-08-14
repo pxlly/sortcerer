@@ -51,7 +51,7 @@ create policy "Users can view own subscription"
 
 -- Service role updates subscriptions via postback (bypasses RLS)
 
--- Master reference: unique ASIN per user
+-- Master reference: SKU is unique per user; multiple SKUs may share an ASIN.
 create table if not exists public.master_reference (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -61,11 +61,36 @@ create table if not exists public.master_reference (
   max_qty_per_box integer,
   product_name text,
   updated_at timestamptz not null default now(),
-  unique (user_id, asin)
+  unique (user_id, sku)
 );
 
-create index if not exists master_reference_user_sku_idx
-  on public.master_reference (user_id, sku);
+-- Idempotent migration for databases created with unique (user_id, asin).
+-- If a user already has duplicate SKUs, retain the most recently updated row.
+delete from public.master_reference older
+using public.master_reference newer
+where older.user_id = newer.user_id
+  and older.sku = newer.sku
+  and (older.updated_at, older.id) < (newer.updated_at, newer.id);
+
+alter table public.master_reference
+  drop constraint if exists master_reference_user_id_asin_key;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conrelid = 'public.master_reference'::regclass
+      and conname = 'master_reference_user_id_sku_key'
+  ) then
+    alter table public.master_reference
+      add constraint master_reference_user_id_sku_key unique (user_id, sku);
+  end if;
+end
+$$;
+
+-- The unique constraint supplies this index; remove the old redundant index.
+drop index if exists public.master_reference_user_sku_idx;
 
 alter table public.master_reference enable row level security;
 

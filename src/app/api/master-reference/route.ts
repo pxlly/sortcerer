@@ -30,7 +30,7 @@ export async function GET() {
   return NextResponse.json({ rows: data ?? [] });
 }
 
-/** Upsert by ASIN (unique per user). Body: { rows: MasterRefRow[] } */
+/** Upsert by SKU (unique per user). Body: { rows: MasterRefRow[] } */
 export async function POST(request: Request) {
   const supabase = await createClient();
   const {
@@ -52,8 +52,9 @@ export async function POST(request: Request) {
 
   const now = new Date().toISOString();
   // Postgres rejects a single INSERT…ON CONFLICT that targets the same row twice.
-  // Catalog PDFs / CSVs often repeat ASINs — keep the last occurrence per ASIN.
-  const byAsin = new Map<
+  // Catalog PDFs / CSVs can repeat SKUs — keep the last occurrence per SKU.
+  // An ASIN may legitimately be used by multiple SKUs in one seller catalog.
+  const bySku = new Map<
     string,
     {
       user_id: string;
@@ -81,7 +82,7 @@ export async function POST(request: Request) {
         ? capMaxQtyByWeight(requestedMaxQty, weightLb)
         : requestedMaxQty;
 
-    byAsin.set(asin, {
+    bySku.set(sku, {
       user_id: user.id,
       asin,
       sku,
@@ -92,7 +93,7 @@ export async function POST(request: Request) {
     });
   }
 
-  const payload = [...byAsin.values()];
+  const payload = [...bySku.values()];
   const duplicatesCollapsed = rows.length - payload.length;
 
   if (payload.length === 0) {
@@ -101,7 +102,7 @@ export async function POST(request: Request) {
 
   const { data, error } = await supabase
     .from('master_reference')
-    .upsert(payload, { onConflict: 'user_id,asin' })
+    .upsert(payload, { onConflict: 'user_id,sku' })
     .select('id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at');
 
   if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
@@ -120,14 +121,14 @@ export async function DELETE(request: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
-  const asin = searchParams.get('asin')?.trim().toUpperCase();
-  if (!asin) return NextResponse.json({ error: 'asin required' }, { status: 400 });
+  const sku = searchParams.get('sku')?.trim();
+  if (!sku) return NextResponse.json({ error: 'sku required' }, { status: 400 });
 
   const { error } = await supabase
     .from('master_reference')
     .delete()
     .eq('user_id', user.id)
-    .eq('asin', asin);
+    .eq('sku', sku);
 
   if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ deleted: true });
