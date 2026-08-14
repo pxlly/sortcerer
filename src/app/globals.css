@@ -250,6 +250,49 @@ a {
   color: var(--sc-text);
 }
 
+/* Shared form controls (auth, billing, settings — not only Order Hub) */
+.order-hub-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--sc-accent);
+  background: transparent;
+  color: var(--sc-accent);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.order-hub-btn:hover {
+  background: var(--sc-accent);
+  color: #0b1020;
+}
+
+.order-hub-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.order-hub-btn-primary {
+  background: linear-gradient(135deg, var(--sc-blue), var(--sc-purple));
+  border: none;
+  color: #fff;
+}
+
+.order-hub-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: linear-gradient(135deg, var(--sc-blue), var(--sc-purple));
+  color: #fff;
+}
+
+.order-hub-error {
+  color: #ff6b7a;
+  margin: 0.5rem 0;
+}
+
+.order-hub-success {
+  color: #4ade80;
+  margin: 0.5rem 0;
+}
+
 .billing-card {
   max-width: 520px;
   margin: 2rem auto;

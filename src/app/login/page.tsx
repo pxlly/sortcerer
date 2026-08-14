@@ -18,15 +18,20 @@ function LoginForm() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const supabase = createClient();
-    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-    setBusy(false);
-    if (err) {
-      setError(err.message);
-      return;
+    try {
+      const supabase = createClient();
+      const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+      if (err) {
+        setError(err.message);
+        return;
+      }
+      router.push(next);
+      router.refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Sign in failed');
+    } finally {
+      setBusy(false);
     }
-    router.push(next);
-    router.refresh();
   };
 
   return (

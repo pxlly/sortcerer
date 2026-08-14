@@ -5,6 +5,24 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
+const SIGNUP_TIMEOUT_MS = 25_000;
+
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -18,19 +36,41 @@ export default function SignupPage() {
     setBusy(true);
     setError(null);
     setInfo(null);
-    const supabase = createClient();
-    const { data, error: err } = await supabase.auth.signUp({ email, password });
-    setBusy(false);
-    if (err) {
-      setError(err.message);
-      return;
+    try {
+      const supabase = createClient();
+      const emailRedirectTo = `${window.location.origin}/auth/callback?next=/billing`;
+      const { data, error: err } = await withTimeout(
+        supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo },
+        }),
+        SIGNUP_TIMEOUT_MS,
+        'Sign up timed out. Check NEXT_PUBLIC_SUPABASE_URL / ANON_KEY on Vercel, and that your Supabase project is reachable.'
+      );
+      if (err) {
+        setError(err.message);
+        return;
+      }
+      // Supabase returns a user with empty identities when the email is already registered
+      // and Confirm email is enabled (avoids leaking account existence).
+      if (data.user && (data.user.identities?.length ?? 0) === 0) {
+        setError('An account with this email may already exist. Try signing in.');
+        return;
+      }
+      if (data.session) {
+        router.push('/billing');
+        router.refresh();
+        return;
+      }
+      setInfo(
+        'Check your email to confirm your account, then sign in. New accounts stay locked until payment.'
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Sign up failed');
+    } finally {
+      setBusy(false);
     }
-    if (data.session) {
-      router.push('/billing');
-      router.refresh();
-      return;
-    }
-    setInfo('Check your email to confirm, then sign in. New accounts start locked until payment.');
   };
 
   return (
