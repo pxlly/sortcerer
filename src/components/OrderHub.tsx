@@ -482,7 +482,7 @@ export default function OrderHub() {
       const pageCount = pdf.getPageCount();
       if (pageCount !== csvRows.length) {
         setPdfError(
-          `PDF has ${pageCount} pages but CSV has ${csvRows.length} rows. They must match.`
+          `PDF has ${pageCount} pages but CSV has ${csvRows.length} rows. They must match (one label per row in the same order).`
         );
         setPdfProcessing(false);
         return;
@@ -534,9 +534,27 @@ export default function OrderHub() {
             for (const name of byUnits[u]) lines.push(name);
             lines.push('');
           }
+          const restLines = wrapTextToWidth(
+            'The rest of the labels are 1 unit orders',
+            regular,
+            fontSize,
+            maxTextWidth
+          );
+          const continuationLines = wrapTextToWidth(
+            '... (continued in multi-unit-report.txt)',
+            regular,
+            fontSize,
+            maxTextWidth
+          );
+          const restHeight = (restLines.length + 1) * lineHeight;
+          const reservedHeight = restHeight + continuationLines.length * lineHeight;
+          let truncated = false;
           for (const rawLine of lines) {
             for (const line of wrapTextToWidth(rawLine, regular, fontSize, maxTextWidth)) {
-              if (y < 28) break;
+              if (y - reservedHeight < 28) {
+                truncated = true;
+                break;
+              }
               if (line.length > 0) {
                 headerPage.drawText(line, {
                   x: left,
@@ -548,15 +566,23 @@ export default function OrderHub() {
               }
               y -= lineHeight;
             }
-            if (y < 28) break;
+            if (truncated) break;
+          }
+          if (truncated) {
+            for (const line of continuationLines) {
+              if (y - restHeight < 28) break;
+              headerPage.drawText(line, {
+                x: left,
+                y,
+                size: fontSize,
+                font: regular,
+                color: rgb(0, 0, 0),
+              });
+              y -= lineHeight;
+            }
           }
           y -= lineHeight;
-          for (const line of wrapTextToWidth(
-            'The rest of the labels are 1 unit orders',
-            regular,
-            fontSize,
-            maxTextWidth
-          )) {
+          for (const line of restLines) {
             if (y < 28) break;
             headerPage.drawText(line, {
               x: left,
@@ -650,7 +676,9 @@ export default function OrderHub() {
       const entryNames = Object.keys(zip.files).filter((name) => !zip.files[name].dir);
       const pdfPaths = selectPdfEntriesForCombine(entryNames);
       if (pdfPaths.length === 0) {
-        setCombineZipError('No PDF files found in the ZIP.');
+        setCombineZipError(
+          'No PDF files found in the ZIP. (Non-PDFs like multi-unit-report.txt are skipped.)'
+        );
         setCombineZipProcessing(false);
         return;
       }
@@ -681,7 +709,9 @@ export default function OrderHub() {
     e.target.value = '';
     setTrackingTxtError(null);
     if (!file || !csvRows?.length) {
-      setTrackingTxtError('Generate CSV first, then upload tracking numbers.');
+      setTrackingTxtError(
+        'Generate and download CSV first, then upload the tracking numbers file.'
+      );
       return;
     }
     const reader = new FileReader();
@@ -693,7 +723,7 @@ export default function OrderHub() {
         .filter((l) => l.length > 0);
       if (trackingNumbers.length !== csvRows.length) {
         setTrackingTxtError(
-          `Tracking file has ${trackingNumbers.length} line(s) but CSV has ${csvRows.length} row(s).`
+          `Tracking file has ${trackingNumbers.length} line(s) but CSV has ${csvRows.length} row(s). They must match (one tracking per CSV row, same order).`
         );
         return;
       }
@@ -807,11 +837,20 @@ export default function OrderHub() {
               <input
                 type="checkbox"
                 checked={fileOrderOnly}
-                onChange={(e) => setFileOrderOnly(e.target.checked)}
+                onChange={(e) => {
+                  setFileOrderOnly(e.target.checked);
+                  setCsvRows(null);
+                  setConvertSummary(null);
+                  setBulkConfirmOrderIds(null);
+                  setPdfError(null);
+                  setCombineZipError(null);
+                  setTrackingTxtError(null);
+                }}
+                aria-label="File order only: no product sort, no labels PDF"
               />
-              <span className="order-hub-switch-slider" />
+              <span className="order-hub-switch-slider" aria-hidden="true" />
             </span>
-            <span>File order only</span>
+            <span>File order only (no sort / no labels PDF)</span>
           </label>
         </div>
         <p className="order-hub-min-orders-desc">
@@ -850,7 +889,10 @@ export default function OrderHub() {
             </div>
             {bulkConfirmOrderIds && bulkConfirmOrderIds.length > 0 && (
               <div className="order-hub-bulk-confirm">
-                <p>Bulk confirm shipment links:</p>
+                <p>
+                  {bulkConfirmOrderIds.length} order(s) — bulk confirm shipment links in groups of{' '}
+                  {BULK_CONFIRM_CHUNK_SIZE}:
+                </p>
                 <ul className="order-hub-bulk-confirm-links">
                   {Array.from(
                     { length: Math.ceil(bulkConfirmOrderIds.length / BULK_CONFIRM_CHUNK_SIZE) },
@@ -868,7 +910,7 @@ export default function OrderHub() {
                             target="_blank"
                             rel="noreferrer"
                           >
-                            Orders {i * BULK_CONFIRM_CHUNK_SIZE + 1}–
+                            Link {i + 1}: orders {i * BULK_CONFIRM_CHUNK_SIZE + 1}–
                             {i * BULK_CONFIRM_CHUNK_SIZE + chunk.length}
                           </a>
                         </li>
@@ -891,40 +933,68 @@ export default function OrderHub() {
                 <input
                   type="checkbox"
                   checked={combineIntoOnePdf}
-                  onChange={(e) => setCombineIntoOnePdf(e.target.checked)}
+                  onChange={(e) => {
+                    setCombineIntoOnePdf(e.target.checked);
+                    setPdfError(null);
+                  }}
+                  aria-label="Download as one combined PDF"
                 />
-                <span className="order-hub-switch-slider" />
+                <span className="order-hub-switch-slider" aria-hidden="true" />
               </span>
               <span>Combine into one PDF</span>
             </label>
           </div>
           <p className="order-hub-min-orders-desc">
-            Upload a PDF with one label per CSV row (same order). Header pages use a smaller font so
-            long titles fit.
+            Upload a single PDF with one label per CSV row, in the same order as the CSV. We split
+            by product and add header pages
+            {combineIntoOnePdf
+              ? ', then merge everything into one combined PDF.'
+              : ', then download a ZIP of separate product PDFs plus multi-unit-report.txt.'}{' '}
+            Header pages use a smaller font so long titles fit.
           </p>
           <input
             ref={labelsPdfRef}
             type="file"
             accept="application/pdf"
             onChange={handleLabelsPdf}
+            disabled={!csvRows?.length || pdfProcessing}
             style={{ display: 'none' }}
           />
           <div
             className="order-hub-upload-area"
             onClick={() => csvRows?.length && !pdfProcessing && labelsPdfRef.current?.click()}
+            onKeyDown={(e) => {
+              if (csvRows?.length && !pdfProcessing && e.key === 'Enter') {
+                labelsPdfRef.current?.click();
+              }
+            }}
             role="button"
-            tabIndex={0}
+            tabIndex={csvRows?.length && !pdfProcessing ? 0 : -1}
+            aria-disabled={!csvRows?.length || pdfProcessing}
+            style={{
+              opacity: csvRows?.length && !pdfProcessing ? 1 : 0.6,
+              cursor: csvRows?.length && !pdfProcessing ? 'pointer' : 'not-allowed',
+            }}
           >
-            {pdfProcessing ? 'Processing…' : 'Upload labels PDF'}
+            {pdfProcessing
+              ? 'Processing…'
+              : combineIntoOnePdf
+                ? 'Choose Labels PDF (combined download)'
+                : 'Choose Labels PDF (ZIP download)'}
           </div>
           {pdfError && <div className="order-hub-error">{pdfError}</div>}
           <details className="order-hub-combine-zip">
             <summary className="order-hub-combine-zip-title">Optional: combine an existing labels ZIP</summary>
+            <p className="order-hub-min-orders-desc">
+              Merge its PDF files alphabetically into one PDF. Non-PDFs such as
+              multi-unit-report.txt are skipped.
+            </p>
             <input
               ref={labelsZipRef}
               type="file"
               accept=".zip"
               onChange={handleCombineLabelsZip}
+              disabled={combineZipProcessing}
               style={{ display: 'none' }}
             />
             <button
@@ -933,7 +1003,7 @@ export default function OrderHub() {
               disabled={combineZipProcessing}
               onClick={() => labelsZipRef.current?.click()}
             >
-              {combineZipProcessing ? 'Combining…' : 'Upload ZIP'}
+              {combineZipProcessing ? 'Combining…' : 'Combine ZIP PDFs'}
             </button>
             {combineZipError && <div className="order-hub-error">{combineZipError}</div>}
           </details>
@@ -943,22 +1013,33 @@ export default function OrderHub() {
       <section className="order-hub-section">
         <h3>Step {fileOrderOnly ? '2' : '3'}: Tracking numbers</h3>
         <p className="order-hub-min-orders-desc">
-          One tracking number per line, same order as CSV rows.
+          Upload one tracking number per line, in the same order as the CSV rows
+          {fileOrderOnly ? '.' : ' and label PDF pages.'} We will download a CSV mapping recipient
+          name to tracking number.
         </p>
         <input
           ref={trackingTxtRef}
           type="file"
           accept=".txt,text/plain"
           onChange={handleTrackingTxt}
+          disabled={!csvRows?.length}
           style={{ display: 'none' }}
         />
         <div
           className="order-hub-upload-area"
           onClick={() => csvRows?.length && trackingTxtRef.current?.click()}
+          onKeyDown={(e) => {
+            if (csvRows?.length && e.key === 'Enter') trackingTxtRef.current?.click();
+          }}
           role="button"
-          tabIndex={0}
+          tabIndex={csvRows?.length ? 0 : -1}
+          aria-disabled={!csvRows?.length}
+          style={{
+            opacity: csvRows?.length ? 1 : 0.6,
+            cursor: csvRows?.length ? 'pointer' : 'not-allowed',
+          }}
         >
-          Upload tracking .txt
+          Choose tracking numbers (.txt)
         </div>
         {trackingTxtError && <div className="order-hub-error">{trackingTxtError}</div>}
       </section>
