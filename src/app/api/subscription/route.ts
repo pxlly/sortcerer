@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { isAdminEmail } from '@/lib/adminEmails';
 import { createClient } from '@/lib/supabase/server';
 
 export async function GET() {
@@ -8,6 +9,17 @@ export async function GET() {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  if (isAdminEmail(user.email)) {
+    return NextResponse.json({
+      active: true,
+      admin: true,
+      status: 'active',
+      current_period_end: null,
+      last_invoice_id: null,
+      configured: Boolean(process.env.TRYBIT_API_KEY && process.env.TRYBIT_SHOP_ID),
+    });
   }
 
   const { data: sub } = await supabase
@@ -24,6 +36,7 @@ export async function GET() {
 
   return NextResponse.json({
     active,
+    admin: false,
     status: active ? 'active' : 'locked',
     current_period_end: sub?.current_period_end ?? null,
     last_invoice_id: sub?.last_invoice_id ?? null,

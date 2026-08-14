@@ -6,6 +6,7 @@ import Link from 'next/link';
 export default function BillingPage() {
   const [status, setStatus] = useState<{
     active: boolean;
+    admin?: boolean;
     status: string;
     current_period_end: string | null;
     configured: boolean;
@@ -65,8 +66,14 @@ export default function BillingPage() {
       {status && (
         <p>
           Status:{' '}
-          <strong>{status.active ? 'Active' : 'Locked'}</strong>
-          {status.current_period_end && (
+          <strong>
+            {status.admin
+              ? 'Admin / complimentary access'
+              : status.active
+                ? 'Active'
+                : 'Locked'}
+          </strong>
+          {!status.admin && status.current_period_end && (
             <> · period ends {new Date(status.current_period_end).toLocaleString()}</>
           )}
         </p>
@@ -74,14 +81,20 @@ export default function BillingPage() {
       {error && <div className="order-hub-error">{error}</div>}
       {devUnlockNote && <p className="order-hub-meta">{devUnlockNote}</p>}
       <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '1rem' }}>
-        <button
-          type="button"
-          className="order-hub-btn order-hub-btn-primary"
-          disabled={busy || status?.active}
-          onClick={pay}
-        >
-          {busy ? 'Creating invoice…' : status?.active ? 'Already active' : 'Pay $100 with Trybit'}
-        </button>
+        {status?.admin ? (
+          <span className="order-hub-meta" style={{ alignSelf: 'center' }}>
+            Admin / complimentary access — no payment required
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="order-hub-btn order-hub-btn-primary"
+            disabled={busy || status?.active}
+            onClick={pay}
+          >
+            {busy ? 'Creating invoice…' : status?.active ? 'Already active' : 'Pay $100 with Trybit'}
+          </button>
+        )}
         <button type="button" className="order-hub-btn" onClick={refresh}>
           Refresh status
         </button>

@@ -35,6 +35,13 @@ Without Supabase env vars, middleware skips auth (useful for UI-only peek). Full
 | `TRYBIT_API_KEY` | Trybit project API key (`Authorization: Token …`) |
 | `TRYBIT_SHOP_ID` | Trybit `shop_id` |
 | `TRYBIT_SECRET_KEY` | HS256 secret to verify postback JWT |
+| `ADMIN_EMAILS` | Comma-separated emails with complimentary Order Hub access (case-insensitive; match Supabase Auth signup email) |
+
+### Admin / complimentary access
+
+Set `ADMIN_EMAILS=you@example.com` (or several emails, comma-separated). Matching accounts skip the Trybit paywall forever — middleware and `/api/subscription` treat them as active. Billing shows “Admin / complimentary access” instead of Pay.
+
+On Vercel: add `ADMIN_EMAILS` with the exact email you use in Supabase Auth, then redeploy (or soft refresh after env is live).
 
 ## Supabase setup
 

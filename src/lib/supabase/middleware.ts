@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { isAdminEmail } from '@/lib/adminEmails';
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -60,6 +61,10 @@ export async function updateSession(request: NextRequest) {
     path.startsWith('/api/subscription');
 
   if (user && !subscriptionExempt) {
+    if (isAdminEmail(user.email)) {
+      return supabaseResponse;
+    }
+
     const { data: sub } = await supabase
       .from('subscriptions')
       .select('status, current_period_end')
