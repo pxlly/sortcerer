@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { formatDbError } from '@/lib/supabase/dbErrors';
 
 export type MasterRefRow = {
   id?: string;
@@ -24,7 +25,7 @@ export async function GET() {
     .eq('user_id', user.id)
     .order('sku', { ascending: true });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ rows: data ?? [] });
 }
 
@@ -72,7 +73,7 @@ export async function POST(request: Request) {
     .upsert(payload, { onConflict: 'user_id,asin' })
     .select('id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at');
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ rows: data ?? [], upserted: payload.length });
 }
 
@@ -93,6 +94,6 @@ export async function DELETE(request: Request) {
     .eq('user_id', user.id)
     .eq('asin', asin);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ deleted: true });
 }

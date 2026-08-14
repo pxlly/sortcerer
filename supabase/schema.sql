@@ -1,5 +1,5 @@
 -- Sortcerer Supabase schema
--- Run in Supabase SQL Editor after creating your project.
+-- Run in Supabase SQL Editor after creating your project (safe to re-run).
 
 -- Profiles (one Amazon store per account)
 create table if not exists public.profiles (
@@ -10,14 +10,17 @@ create table if not exists public.profiles (
 
 alter table public.profiles enable row level security;
 
+drop policy if exists "Users can view own profile" on public.profiles;
 create policy "Users can view own profile"
   on public.profiles for select
   using (auth.uid() = user_id);
 
+drop policy if exists "Users can insert own profile" on public.profiles;
 create policy "Users can insert own profile"
   on public.profiles for insert
   with check (auth.uid() = user_id);
 
+drop policy if exists "Users can update own profile" on public.profiles;
 create policy "Users can update own profile"
   on public.profiles for update
   using (auth.uid() = user_id);
@@ -35,17 +38,13 @@ create table if not exists public.subscriptions (
   updated_at timestamptz not null default now()
 );
 
--- Existing projects (already ran an older schema.sql): run this once in SQL Editor:
---   alter table public.subscriptions
---     add column if not exists setup_paid boolean not null default false;
---   -- Prior $100 invoices counted as setup for existing payers
---   update public.subscriptions
---   set setup_paid = true
---   where setup_paid = false
---     and (last_invoice_id is not null or status = 'active' or current_period_end is not null);
+-- Existing projects that ran an older schema.sql without setup_paid:
+alter table public.subscriptions
+  add column if not exists setup_paid boolean not null default false;
 
 alter table public.subscriptions enable row level security;
 
+drop policy if exists "Users can view own subscription" on public.subscriptions;
 create policy "Users can view own subscription"
   on public.subscriptions for select
   using (auth.uid() = user_id);
@@ -70,18 +69,22 @@ create index if not exists master_reference_user_sku_idx
 
 alter table public.master_reference enable row level security;
 
+drop policy if exists "Users can view own master ref" on public.master_reference;
 create policy "Users can view own master ref"
   on public.master_reference for select
   using (auth.uid() = user_id);
 
+drop policy if exists "Users can insert own master ref" on public.master_reference;
 create policy "Users can insert own master ref"
   on public.master_reference for insert
   with check (auth.uid() = user_id);
 
+drop policy if exists "Users can update own master ref" on public.master_reference;
 create policy "Users can update own master ref"
   on public.master_reference for update
   using (auth.uid() = user_id);
 
+drop policy if exists "Users can delete own master ref" on public.master_reference;
 create policy "Users can delete own master ref"
   on public.master_reference for delete
   using (auth.uid() = user_id);
@@ -110,3 +113,6 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
+
+-- Ask PostgREST to refresh its schema cache (usually automatic within a few seconds)
+notify pgrst, 'reload schema';
