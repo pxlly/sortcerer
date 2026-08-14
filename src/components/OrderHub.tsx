@@ -31,7 +31,65 @@ const BULK_CONFIRM_CHUNK_SIZE = 50;
 
 /** Smaller than WeShop (20/23) so long product titles fit on label header pages. */
 const HEADER_FONT_SIZE = 13;
-const HEADER_WRAP_CHARS = 36;
+const HEADER_MARGIN = 28;
+
+type MeasurableFont = { widthOfTextAtSize: (text: string, size: number) => number };
+
+/**
+ * Wrap header text on word boundaries using real font metrics. Words longer than
+ * a full line are split by character as a last resort.
+ */
+function wrapTextToWidth(
+  text: string,
+  font: MeasurableFont,
+  fontSize: number,
+  maxWidth: number
+): string[] {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return [''];
+
+  const fits = (candidate: string) => font.widthOfTextAtSize(candidate, fontSize) <= maxWidth;
+
+  const splitLongWord = (word: string): string[] => {
+    const parts: string[] = [];
+    let current = '';
+    for (const char of word) {
+      if (current && !fits(current + char)) {
+        parts.push(current);
+        current = char;
+      } else {
+        current += char;
+      }
+    }
+    if (current) parts.push(current);
+    return parts;
+  };
+
+  const lines: string[] = [];
+  let line = '';
+
+  for (const word of normalized.split(' ')) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (fits(candidate)) {
+      line = candidate;
+      continue;
+    }
+    if (line) {
+      lines.push(line);
+      line = '';
+    }
+    if (fits(word)) {
+      line = word;
+      continue;
+    }
+    const chunks = splitLongWord(word);
+    lines.push(...chunks.slice(0, -1));
+    line = chunks[chunks.length - 1] ?? '';
+  }
+
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [''];
+}
 
 function getUniqueOrderIds(rows: ParsedOrderRow[]): string[] {
   const ids: string[] = [];
@@ -408,14 +466,6 @@ export default function OrderHub() {
     URL.revokeObjectURL(url);
   };
 
-  const wrapAtChars = (text: string, width: number): string[] => {
-    const s = (text || '').trim();
-    if (!s) return [''];
-    const out: string[] = [];
-    for (let i = 0; i < s.length; i += width) out.push(s.slice(i, i + width));
-    return out;
-  };
-
   const handleLabelsPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -457,11 +507,11 @@ export default function OrderHub() {
         const bold = await newPdf.embedFont(StandardFonts.HelveticaBold);
         const regular = await newPdf.embedFont(StandardFonts.Helvetica);
         const fontSize = HEADER_FONT_SIZE;
-        const wrapAt = HEADER_WRAP_CHARS;
         const lineHeight = fontSize + 3;
-        const left = 28;
+        const left = HEADER_MARGIN;
+        const maxTextWidth = width - left * 2;
         let y = height - 48;
-        for (const line of wrapAtChars(`Product: ${productName}`, wrapAt)) {
+        for (const line of wrapTextToWidth(`Product: ${productName}`, bold, fontSize, maxTextWidth)) {
           headerPage.drawText(line, { x: left, y, size: fontSize, font: bold, color: rgb(0, 0, 0) });
           y -= lineHeight;
         }
@@ -485,7 +535,7 @@ export default function OrderHub() {
             lines.push('');
           }
           for (const rawLine of lines) {
-            for (const line of wrapAtChars(rawLine, wrapAt)) {
+            for (const line of wrapTextToWidth(rawLine, regular, fontSize, maxTextWidth)) {
               if (y < 28) break;
               if (line.length > 0) {
                 headerPage.drawText(line, {
@@ -501,7 +551,12 @@ export default function OrderHub() {
             if (y < 28) break;
           }
           y -= lineHeight;
-          for (const line of wrapAtChars('The rest of the labels are 1 unit orders', wrapAt)) {
+          for (const line of wrapTextToWidth(
+            'The rest of the labels are 1 unit orders',
+            regular,
+            fontSize,
+            maxTextWidth
+          )) {
             if (y < 28) break;
             headerPage.drawText(line, {
               x: left,
@@ -513,7 +568,7 @@ export default function OrderHub() {
             y -= lineHeight;
           }
         } else {
-          for (const line of wrapAtChars('Single-unit labels', wrapAt)) {
+          for (const line of wrapTextToWidth('Single-unit labels', regular, fontSize, maxTextWidth)) {
             headerPage.drawText(line, {
               x: left,
               y,
