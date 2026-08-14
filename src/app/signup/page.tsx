@@ -76,7 +76,7 @@ export default function SignupPage() {
   return (
     <div className="sc-auth-card">
       <h1>Create account</h1>
-      <p>$100/month via Trybit. Account unlocks after payment.</p>
+      <p>$300 setup, then $175/mo via Trybit. Account unlocks after payment.</p>
       <form onSubmit={onSubmit}>
         <label>
           Email

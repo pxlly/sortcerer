@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAdminEmail } from '@/lib/adminEmails';
+import { invoiceAmountUsd, MONTHLY_USD, SETUP_FEE_USD } from '@/lib/pricing';
 import { createClient } from '@/lib/supabase/server';
 
 export async function GET() {
@@ -16,6 +17,10 @@ export async function GET() {
       active: true,
       admin: true,
       status: 'active',
+      setup_paid: true,
+      next_amount_usd: MONTHLY_USD,
+      setup_fee_usd: SETUP_FEE_USD,
+      monthly_usd: MONTHLY_USD,
       current_period_end: null,
       last_invoice_id: null,
       configured: Boolean(process.env.TRYBIT_API_KEY && process.env.TRYBIT_SHOP_ID),
@@ -24,7 +29,7 @@ export async function GET() {
 
   const { data: sub } = await supabase
     .from('subscriptions')
-    .select('status, current_period_end, last_invoice_id, last_order_id, updated_at')
+    .select('status, setup_paid, current_period_end, last_invoice_id, last_order_id, updated_at')
     .eq('user_id', user.id)
     .maybeSingle();
 
@@ -33,11 +38,16 @@ export async function GET() {
     sub?.status === 'active' &&
     !!sub.current_period_end &&
     new Date(sub.current_period_end).getTime() > now;
+  const setupPaid = Boolean(sub?.setup_paid);
 
   return NextResponse.json({
     active,
     admin: false,
     status: active ? 'active' : 'locked',
+    setup_paid: setupPaid,
+    next_amount_usd: invoiceAmountUsd(setupPaid),
+    setup_fee_usd: SETUP_FEE_USD,
+    monthly_usd: MONTHLY_USD,
     current_period_end: sub?.current_period_end ?? null,
     last_invoice_id: sub?.last_invoice_id ?? null,
     configured: Boolean(process.env.TRYBIT_API_KEY && process.env.TRYBIT_SHOP_ID),

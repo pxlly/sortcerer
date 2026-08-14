@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
+import { invoiceAmountUsd } from '@/lib/pricing';
 import { createClient } from '@/lib/supabase/server';
 import { createServiceClient } from '@/lib/supabase/admin';
-
-const MONTHLY_USD = 100;
 
 export async function POST() {
   const apiKey = process.env.TRYBIT_API_KEY;
@@ -27,6 +26,14 @@ export async function POST() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  const { data: sub } = await supabase
+    .from('subscriptions')
+    .select('setup_paid')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  const setupPaid = Boolean(sub?.setup_paid);
+  const amountUsd = invoiceAmountUsd(setupPaid);
   const orderId = `sortcerer-${user.id.slice(0, 8)}-${Date.now()}`;
 
   const res = await fetch('https://api.trybit.com/v2/invoice/create', {
@@ -37,7 +44,7 @@ export async function POST() {
     },
     body: JSON.stringify({
       shop_id: shopId,
-      amount: MONTHLY_USD,
+      amount: amountUsd,
       currency: 'USD',
       order_id: orderId,
       email: user.email ?? undefined,
@@ -79,6 +86,8 @@ export async function POST() {
     orderId,
     invoiceId,
     link: result.link,
-    amountUsd: MONTHLY_USD,
+    amountUsd,
+    setupPaid,
+    kind: setupPaid ? 'renewal' : 'setup',
   });
 }

@@ -67,7 +67,7 @@ export async function POST(request: Request) {
 
   const { data: byOrder } = await admin
     .from('subscriptions')
-    .select('user_id')
+    .select('user_id, setup_paid')
     .eq('last_order_id', orderId)
     .maybeSingle();
 
@@ -76,7 +76,7 @@ export async function POST(request: Request) {
   if (!userId) {
     const { data: byInvoice } = await admin
       .from('subscriptions')
-      .select('user_id')
+      .select('user_id, setup_paid')
       .eq('last_invoice_id', invoiceId.startsWith('INV-') ? invoiceId : `INV-${invoiceId}`)
       .maybeSingle();
     userId = byInvoice?.user_id as string | undefined;
@@ -94,9 +94,11 @@ export async function POST(request: Request) {
   const periodEnd = new Date(Date.now() + PERIOD_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const invStored = invoiceId.startsWith('INV-') ? invoiceId : `INV-${invoiceId}`;
 
+  // Any successful payment marks setup as paid (first invoice is the $300 setup fee).
   const { error } = await admin.from('subscriptions').upsert({
     user_id: userId,
     status: 'active',
+    setup_paid: true,
     current_period_end: periodEnd,
     last_invoice_id: invStored,
     last_order_id: orderId,

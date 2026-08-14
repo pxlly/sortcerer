@@ -12,7 +12,7 @@ export default function HomePage() {
         </p>
         <div className="sc-cta-row">
           <Link href="/signup" className="sc-cta sc-cta-primary">
-            Start — $100/mo
+            Start — $300 setup, then $175/mo
           </Link>
           <Link href="/login" className="sc-cta sc-cta-ghost">
             Sign in

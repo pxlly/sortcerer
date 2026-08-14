@@ -3,14 +3,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 
+type SubStatus = {
+  active: boolean;
+  admin?: boolean;
+  status: string;
+  setup_paid?: boolean;
+  next_amount_usd?: number;
+  setup_fee_usd?: number;
+  monthly_usd?: number;
+  current_period_end: string | null;
+  configured: boolean;
+};
+
 export default function BillingPage() {
-  const [status, setStatus] = useState<{
-    active: boolean;
-    admin?: boolean;
-    status: string;
-    current_period_end: string | null;
-    configured: boolean;
-  } | null>(null);
+  const [status, setStatus] = useState<SubStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [devUnlockNote, setDevUnlockNote] = useState<string | null>(null);
@@ -56,13 +62,30 @@ export default function BillingPage() {
     }
   };
 
+  const setupFee = status?.setup_fee_usd ?? 300;
+  const monthly = status?.monthly_usd ?? 175;
+  const setupPaid = Boolean(status?.setup_paid);
+  const nextAmount = status?.next_amount_usd ?? (setupPaid ? monthly : setupFee);
+  const payLabel = setupPaid
+    ? `Renew $${monthly} with Trybit`
+    : `Pay setup $${setupFee} with Trybit`;
+
   return (
     <div className="billing-card">
       <h1>Billing</h1>
       <p className="order-hub-min-orders-desc">
-        Sortcerer is <span className="billing-price">$100 USD / month</span>. Your account stays locked
-        until the month is paid (Trybit crypto invoice). Postback unlocks ~30 days of access.
+        <span className="billing-price">Setup ${setupFee}</span> (one-time, first payment), then{' '}
+        <span className="billing-price">Renew ${monthly}/mo</span>. Your account stays locked until
+        paid (Trybit crypto invoice). Postback unlocks ~30 days of access.
       </p>
+      {status && !status.admin && (
+        <p className="order-hub-meta">
+          Next invoice:{' '}
+          <strong>
+            {setupPaid ? `Renew $${nextAmount}` : `Setup $${nextAmount}`}
+          </strong>
+        </p>
+      )}
       {status && (
         <p>
           Status:{' '}
@@ -92,7 +115,7 @@ export default function BillingPage() {
             disabled={busy || status?.active}
             onClick={pay}
           >
-            {busy ? 'Creating invoice…' : status?.active ? 'Already active' : 'Pay $100 with Trybit'}
+            {busy ? 'Creating invoice…' : status?.active ? 'Already active' : payLabel}
           </button>
         )}
         <button type="button" className="order-hub-btn" onClick={refresh}>

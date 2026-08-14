@@ -22,15 +22,27 @@ create policy "Users can update own profile"
   on public.profiles for update
   using (auth.uid() = user_id);
 
--- Subscriptions (locked until monthly invoice paid)
+-- Subscriptions (locked until invoice paid)
+-- First successful payment = $300 setup; renewals = $175 / ~30 days.
+-- setup_paid tracks whether the one-time signup fee has been collected.
 create table if not exists public.subscriptions (
   user_id uuid primary key references auth.users (id) on delete cascade,
   status text not null default 'locked' check (status in ('active', 'locked')),
+  setup_paid boolean not null default false,
   current_period_end timestamptz,
   last_invoice_id text,
   last_order_id text,
   updated_at timestamptz not null default now()
 );
+
+-- Existing projects (already ran an older schema.sql): run this once in SQL Editor:
+--   alter table public.subscriptions
+--     add column if not exists setup_paid boolean not null default false;
+--   -- Prior $100 invoices counted as setup for existing payers
+--   update public.subscriptions
+--   set setup_paid = true
+--   where setup_paid = false
+--     and (last_invoice_id is not null or status = 'active' or current_period_end is not null);
 
 alter table public.subscriptions enable row level security;
 

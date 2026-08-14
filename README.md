@@ -1,12 +1,12 @@
 # Sortcerer (sortcerer.net)
 
-Amazon FBM Order Hub SaaS: unshipped orders → shipping CSV, label PDF split with smaller header fonts, Keepa auto-fill for weight / max units per box, catalog PDF import, and Trybit $100/mo paywall.
+Amazon FBM Order Hub SaaS: unshipped orders → shipping CSV, label PDF split with smaller header fonts, Keepa auto-fill for weight / max units per box, catalog PDF import, and Trybit paywall ($300 setup, then $175/mo).
 
 ## Stack
 
 - Next.js App Router + TypeScript + Tailwind
 - Supabase Auth (email/password) + Postgres
-- Trybit monthly crypto invoice ($100 USD)
+- Trybit crypto invoices ($300 setup once, then $175 USD / ~30 days)
 - Keepa product API (server-side only)
 
 ## Local setup
@@ -54,16 +54,32 @@ On Vercel: add `ADMIN_EMAILS` with the exact email you use in Supabase Auth, the
 Schema highlights:
 
 - `profiles` — optional `store_name` (one store per account)
-- `subscriptions` — `active` / `locked`, `current_period_end`
+- `subscriptions` — `active` / `locked`, `setup_paid`, `current_period_end`
 - `master_reference` — unique `(user_id, asin)`
 
-New signups get a profile + **locked** subscription via trigger.
+New signups get a profile + **locked** subscription via trigger (`setup_paid = false`).
+
+### Existing project migration (add setup fee column)
+
+If you already ran an older `schema.sql`, run this once in the Supabase SQL Editor:
+
+```sql
+alter table public.subscriptions
+  add column if not exists setup_paid boolean not null default false;
+
+-- Prior $100 invoices counted as setup for existing payers
+update public.subscriptions
+set setup_paid = true
+where setup_paid = false
+  and (last_invoice_id is not null or status = 'active' or current_period_end is not null);
+```
 
 ### Dev unlock (no Trybit yet)
 
 ```sql
 update public.subscriptions
 set status = 'active',
+    setup_paid = true,
     current_period_end = now() + interval '30 days'
 where user_id = '<your-user-uuid>';
 ```
@@ -81,10 +97,11 @@ where user_id = '<your-user-uuid>';
 
 Flow:
 
-1. Logged-in user hits **Pay $100** → `POST /api/trybit/create-invoice`
+1. Logged-in user hits **Pay setup $300** (or **Renew $175**) → `POST /api/trybit/create-invoice`
+   - Amount is **$300** when `subscriptions.setup_paid` is false, otherwise **$175**
 2. User pays on Trybit-hosted link
 3. Trybit posts to `/api/trybit/postback` with JWT (`token`) signed by `TRYBIT_SECRET_KEY`
-4. App sets subscription `active` with `current_period_end` ≈ now + 30 days
+4. App sets subscription `active`, `setup_paid = true`, and `current_period_end` ≈ now + 30 days
 
 If keys are missing, the billing page shows a clear “configure env” message (no fake sandbox).
 
