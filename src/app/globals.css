@@ -64,7 +64,9 @@ a {
 }
 
 .sc-logo {
-  border-radius: 10px;
+  border-radius: 0;
+  background: transparent;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
 }
 
 .sc-brand-text {

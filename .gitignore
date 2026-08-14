@@ -23,6 +23,9 @@
 # misc
 .DS_Store
 *.pem
+.venv-img/
+.u2net/
+public/logo-original-bg.png
 
 # debug
 npm-debug.log*

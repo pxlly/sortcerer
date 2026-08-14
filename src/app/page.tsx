@@ -5,7 +5,14 @@ export default function HomePage() {
   return (
     <div className="sc-landing">
       <div className="sc-landing-hero">
-        <Image src="/logo.png" alt="Sortcerer logo" width={120} height={120} priority />
+        <Image
+          src="/logo.png"
+          alt="Sortcerer logo"
+          width={120}
+          height={120}
+          priority
+          className="sc-logo"
+        />
         <h1>Sortcerer</h1>
         <p className="tagline">
           Automation solutions for E-commerce brands

@@ -18,7 +18,14 @@ const manrope = Manrope({
 export const metadata: Metadata = {
   title: 'Sortcerer — Order Hub for Amazon sellers',
   description: 'Unshipped orders to labels, packing, Keepa enrich, and master reference.',
-  icons: { icon: '/logo.png' },
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/favicon-32.png', type: 'image/png', sizes: '32x32' },
+      { url: '/logo.png', type: 'image/png' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180' }],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
