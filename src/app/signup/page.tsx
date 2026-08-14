@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
+import { formatAuthError } from '@/lib/supabase/authErrors';
 import { createClient } from '@/lib/supabase/client';
 
 const SIGNUP_TIMEOUT_MS = 25_000;
@@ -46,10 +47,10 @@ export default function SignupPage() {
           options: { emailRedirectTo },
         }),
         SIGNUP_TIMEOUT_MS,
-        'Sign up timed out. Check NEXT_PUBLIC_SUPABASE_URL / ANON_KEY on Vercel, and that your Supabase project is reachable.'
+        'Sign up timed out. Check NEXT_PUBLIC_SUPABASE_URL / ANON_KEY on Vercel (Production), redeploy, and that https://YOUR_REF.supabase.co/auth/v1/health loads in a browser.'
       );
       if (err) {
-        setError(err.message);
+        setError(formatAuthError(err));
         return;
       }
       // Supabase returns a user with empty identities when the email is already registered
@@ -67,7 +68,7 @@ export default function SignupPage() {
         'Check your email to confirm your account, then sign in. New accounts stay locked until payment.'
       );
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Sign up failed');
+      setError(formatAuthError(err));
     } finally {
       setBusy(false);
     }

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, Suspense, useState } from 'react';
+import { formatAuthError } from '@/lib/supabase/authErrors';
 import { createClient } from '@/lib/supabase/client';
 
 function LoginForm() {
@@ -22,13 +23,13 @@ function LoginForm() {
       const supabase = createClient();
       const { error: err } = await supabase.auth.signInWithPassword({ email, password });
       if (err) {
-        setError(err.message);
+        setError(formatAuthError(err));
         return;
       }
       router.push(next);
       router.refresh();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Sign in failed');
+      setError(formatAuthError(err));
     } finally {
       setBusy(false);
     }
