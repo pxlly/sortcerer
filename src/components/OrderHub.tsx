@@ -687,43 +687,55 @@ export default function OrderHub() {
       <section className="order-hub-section">
         <h3>Default From Address</h3>
         <div className="order-hub-form-row">
-          <label>From Name</label>
-          <input
-            value={fromAddress.fromName}
-            onChange={(e) => setFromAddress((p) => ({ ...p, fromName: e.target.value }))}
-          />
+          <label>
+            From Name
+            <input
+              value={fromAddress.fromName}
+              onChange={(e) => setFromAddress((p) => ({ ...p, fromName: e.target.value }))}
+            />
+          </label>
         </div>
         <div className="order-hub-form-row">
-          <label>Street 1</label>
-          <input
-            value={fromAddress.fromStreet1}
-            onChange={(e) => setFromAddress((p) => ({ ...p, fromStreet1: e.target.value }))}
-          />
-          <label>Street 2</label>
-          <input
-            value={fromAddress.fromStreet2}
-            onChange={(e) => setFromAddress((p) => ({ ...p, fromStreet2: e.target.value }))}
-          />
+          <label>
+            Street 1
+            <input
+              value={fromAddress.fromStreet1}
+              onChange={(e) => setFromAddress((p) => ({ ...p, fromStreet1: e.target.value }))}
+            />
+          </label>
+          <label>
+            Street 2
+            <input
+              value={fromAddress.fromStreet2}
+              onChange={(e) => setFromAddress((p) => ({ ...p, fromStreet2: e.target.value }))}
+            />
+          </label>
         </div>
         <div className="order-hub-form-row">
-          <label>City</label>
-          <input
-            value={fromAddress.fromCity}
-            onChange={(e) => setFromAddress((p) => ({ ...p, fromCity: e.target.value }))}
-          />
-          <label>State</label>
-          <input
-            value={fromAddress.fromState}
-            onChange={(e) => setFromAddress((p) => ({ ...p, fromState: e.target.value.trim() }))}
-          />
-          <label>ZIP</label>
-          <input
-            value={fromAddress.fromZip}
-            onChange={(e) =>
-              setFromAddress((p) => ({ ...p, fromZip: normalizeZip(e.target.value) }))
-            }
-            maxLength={5}
-          />
+          <label>
+            City
+            <input
+              value={fromAddress.fromCity}
+              onChange={(e) => setFromAddress((p) => ({ ...p, fromCity: e.target.value }))}
+            />
+          </label>
+          <label>
+            State
+            <input
+              value={fromAddress.fromState}
+              onChange={(e) => setFromAddress((p) => ({ ...p, fromState: e.target.value.trim() }))}
+            />
+          </label>
+          <label>
+            ZIP
+            <input
+              value={fromAddress.fromZip}
+              onChange={(e) =>
+                setFromAddress((p) => ({ ...p, fromZip: normalizeZip(e.target.value) }))
+              }
+              maxLength={5}
+            />
+          </label>
         </div>
         <button type="button" className="order-hub-btn order-hub-btn-primary" onClick={saveFromAddress}>
           Save From Address
