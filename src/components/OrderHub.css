@@ -272,6 +272,7 @@
 .order-hub-modal .form-actions {
   margin-top: 1rem;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   justify-content: flex-end;
 }

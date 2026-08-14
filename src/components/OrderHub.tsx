@@ -912,7 +912,10 @@ export default function OrderHub() {
         <div className="order-hub-modal-overlay">
           <div className="order-hub-modal order-hub-modal-wide">
             <h4>High quantity orders</h4>
-            <p className="order-hub-min-orders-desc">These orders have more than 4 units:</p>
+            <p className="order-hub-min-orders-desc">
+              These orders have more than 4 units. Include them in the CSV, or omit them and
+              convert the rest.
+            </p>
             <ul className="order-hub-high-qty-list">
               {highQtyConfirmModal.map((o, i) => (
                 <li key={i}>
@@ -933,14 +936,34 @@ export default function OrderHub() {
               </button>
               <button
                 type="button"
+                className="order-hub-btn"
+                onClick={() => {
+                  const rows = pendingConversionOrderRowsRef.current;
+                  setHighQtyConfirmModal(null);
+                  pendingConversionOrderRowsRef.current = null;
+                  if (!rows) return;
+                  const withoutHighQty = rows.filter((o) => o.qty <= 4);
+                  if (withoutHighQty.length === 0) {
+                    showToast('No orders left after omitting. Upload a new file to try again.');
+                    return;
+                  }
+                  pendingConversionOmittedRef.current += rows.length - withoutHighQty.length;
+                  runConversion(withoutHighQty);
+                }}
+              >
+                Omit these orders
+              </button>
+              <button
+                type="button"
                 className="order-hub-btn order-hub-btn-primary"
                 onClick={() => {
                   const rows = pendingConversionOrderRowsRef.current;
                   setHighQtyConfirmModal(null);
+                  pendingConversionOrderRowsRef.current = null;
                   if (rows) runConversion(rows);
                 }}
               >
-                Continue
+                Include &amp; continue
               </button>
             </div>
           </div>
