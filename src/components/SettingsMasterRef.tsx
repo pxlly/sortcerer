@@ -13,6 +13,23 @@ type Row = {
   product_name: string | null;
 };
 
+type EnrichProgress = {
+  completed: number;
+  total: number;
+  enriched: number;
+  failed: number;
+  status: string;
+};
+
+const ENRICH_BATCH_SIZE = 10;
+const ENRICH_BATCH_DELAY_MS = 35_000;
+const MAX_RATE_LIMIT_RETRIES = 3;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRateLimitError = (message: unknown) =>
+  /(?:429|rate.?limit|token|refill|too many requests)/i.test(String(message || ''));
+
 export default function SettingsMasterRef() {
   const [rows, setRows] = useState<Row[]>([]);
   const [storeName, setStoreName] = useState('');
@@ -21,6 +38,7 @@ export default function SettingsMasterRef() {
   const [error, setError] = useState<string | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [keepaBusy, setKeepaBusy] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState<EnrichProgress | null>(null);
   const csvRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
 
@@ -77,7 +95,7 @@ export default function SettingsMasterRef() {
     else showToast('Store name saved (one Amazon store per account).');
   };
 
-  const upsertRows = async (incoming: Row[]) => {
+  const upsertRows = async (incoming: Row[], reloadAfter = true) => {
     const res = await fetch('/api/master-reference', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -85,7 +103,7 @@ export default function SettingsMasterRef() {
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Upsert failed');
-    await load();
+    if (reloadAfter) await load();
     return {
       upserted: json.upserted as number,
       duplicatesCollapsed: (json.duplicatesCollapsed as number) || 0,
@@ -174,39 +192,118 @@ export default function SettingsMasterRef() {
       showToast('All rows already have weight and max qty.');
       return;
     }
+
     setKeepaBusy(true);
+    setError(null);
+    setEnrichProgress({
+      completed: 0,
+      total: need.length,
+      enriched: 0,
+      failed: 0,
+      status: 'Starting API enrichment…',
+    });
+
+    const sourceRows = new Map(rows.map((row) => [row.asin, row]));
+    const queue = need.map((asin) => ({ asin, attempts: 0 }));
+    let completed = 0;
+    let enriched = 0;
+    let failed = 0;
+
     try {
-      const batch = need.slice(0, 20);
-      const res = await fetch('/api/keepa/enrich', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ asins: batch }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Keepa failed');
-      const updates: Row[] = [];
-      for (const result of json.results || []) {
-        const existing = rows.find((r) => r.asin === result.asin);
-        if (!existing) continue;
-        if (result.weightLb == null && result.maxQtyPerBox == null) continue;
-        updates.push({
-          asin: existing.asin,
-          sku: existing.sku,
-          weight_lb: result.weightLb ?? existing.weight_lb,
-          max_qty_per_box: result.maxQtyPerBox ?? existing.max_qty_per_box,
-          product_name: result.productName || existing.product_name,
+      while (queue.length > 0) {
+        const batch = queue.splice(0, ENRICH_BATCH_SIZE);
+        setEnrichProgress({
+          completed,
+          total: need.length,
+          enriched,
+          failed,
+          status: `Processing ${batch.length} ASIN${batch.length === 1 ? '' : 's'}…`,
         });
+
+        const res = await fetch('/api/keepa/enrich', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asins: batch.map((item) => item.asin) }),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || 'API enrichment failed');
+
+        const updates: Row[] = [];
+        const resultsByAsin = new Map<string, Record<string, unknown>>(
+          (json.results || []).map((result: Record<string, unknown>) => [
+            String(result.asin),
+            result,
+          ])
+        );
+
+        for (const item of batch) {
+          const result = resultsByAsin.get(item.asin);
+          const existing = sourceRows.get(item.asin);
+          if (!result || !existing) {
+            completed++;
+            failed++;
+            continue;
+          }
+
+          if (
+            isRateLimitError(result.error) &&
+            item.attempts + 1 < MAX_RATE_LIMIT_RETRIES
+          ) {
+            queue.push({ asin: item.asin, attempts: item.attempts + 1 });
+            continue;
+          }
+
+          const hasUsableData = result.weightLb != null || result.maxQtyPerBox != null;
+          if (!hasUsableData) {
+            completed++;
+            failed++;
+            continue;
+          }
+
+          updates.push({
+            asin: existing.asin,
+            sku: existing.sku,
+            weight_lb:
+              typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb,
+            max_qty_per_box:
+              typeof result.maxQtyPerBox === 'number'
+                ? result.maxQtyPerBox
+                : existing.max_qty_per_box,
+            product_name:
+              typeof result.productName === 'string' && result.productName
+                ? result.productName
+                : existing.product_name,
+          });
+          completed++;
+          enriched++;
+        }
+
+        if (updates.length > 0) await upsertRows(updates, false);
+
+        setEnrichProgress({
+          completed,
+          total: need.length,
+          enriched,
+          failed,
+          status:
+            queue.length > 0
+              ? `Waiting for API capacity before the next ${Math.min(ENRICH_BATCH_SIZE, queue.length)}…`
+              : 'Finishing…',
+        });
+
+        if (queue.length > 0) await wait(ENRICH_BATCH_DELAY_MS);
       }
-      if (updates.length === 0) {
-        showToast('Keepa returned no usable dims/weight for this batch.');
-        return;
-      }
-      const { upserted: n } = await upsertRows(updates);
-      showToast(`Keepa enriched ${n} ASIN(s). ${need.length > 20 ? 'Run again for more.' : ''}`);
+
+      await load();
+      showToast(`API enrichment complete: ${enriched} enriched${failed ? `, ${failed} unavailable` : ''}.`);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Keepa enrich failed');
+      setError(err instanceof Error ? err.message : 'API enrichment failed');
+      await load();
     } finally {
       setKeepaBusy(false);
+      setEnrichProgress((progress) =>
+        progress ? { ...progress, completed, enriched, failed, status: 'Complete' } : null
+      );
     }
   };
 
@@ -299,9 +396,25 @@ export default function SettingsMasterRef() {
             disabled={keepaBusy}
             onClick={enrichMissing}
           >
-            {keepaBusy ? 'Enriching…' : 'Keepa enrich missing'}
+            {keepaBusy ? 'Enriching…' : 'API Enrich'}
           </button>
         </div>
+        {enrichProgress && (
+          <div className="settings-enrich-progress" role="status" aria-live="polite">
+            <div className="settings-enrich-progress-copy">
+              <span>{enrichProgress.status}</span>
+              <span>
+                {enrichProgress.completed}/{enrichProgress.total} ({enrichProgress.enriched} enriched
+                {enrichProgress.failed ? `, ${enrichProgress.failed} unavailable` : ''})
+              </span>
+            </div>
+            <progress
+              value={enrichProgress.completed}
+              max={Math.max(1, enrichProgress.total)}
+              aria-label="API enrichment progress"
+            />
+          </div>
+        )}
         {loading ? (
           <p>Loading…</p>
         ) : (
