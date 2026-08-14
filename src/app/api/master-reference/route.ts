@@ -49,20 +49,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'rows[] required' }, { status: 400 });
   }
 
-  const payload = rows
-    .map((r) => ({
+  const now = new Date().toISOString();
+  // Postgres rejects a single INSERT…ON CONFLICT that targets the same row twice.
+  // Catalog PDFs / CSVs often repeat ASINs — keep the last occurrence per ASIN.
+  const byAsin = new Map<
+    string,
+    {
+      user_id: string;
+      asin: string;
+      sku: string;
+      weight_lb: number | null;
+      max_qty_per_box: number | null;
+      product_name: string | null;
+      updated_at: string;
+    }
+  >();
+
+  for (const r of rows) {
+    const asin = String(r.asin || '').trim().toUpperCase();
+    const sku = String(r.sku || '').trim();
+    if (!asin || !sku) continue;
+    byAsin.set(asin, {
       user_id: user.id,
-      asin: String(r.asin || '').trim().toUpperCase(),
-      sku: String(r.sku || '').trim(),
+      asin,
+      sku,
       weight_lb: r.weight_lb == null || r.weight_lb === ('' as unknown) ? null : Number(r.weight_lb),
       max_qty_per_box:
         r.max_qty_per_box == null || r.max_qty_per_box === ('' as unknown)
           ? null
           : Math.max(1, parseInt(String(r.max_qty_per_box), 10) || 1),
       product_name: r.product_name ? String(r.product_name).trim() : null,
-      updated_at: new Date().toISOString(),
-    }))
-    .filter((r) => r.asin && r.sku);
+      updated_at: now,
+    });
+  }
+
+  const payload = [...byAsin.values()];
+  const duplicatesCollapsed = rows.length - payload.length;
 
   if (payload.length === 0) {
     return NextResponse.json({ error: 'No valid rows (ASIN + SKU required)' }, { status: 400 });
@@ -74,7 +96,11 @@ export async function POST(request: Request) {
     .select('id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at');
 
   if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
-  return NextResponse.json({ rows: data ?? [], upserted: payload.length });
+  return NextResponse.json({
+    rows: data ?? [],
+    upserted: payload.length,
+    duplicatesCollapsed: Math.max(0, duplicatesCollapsed),
+  });
 }
 
 export async function DELETE(request: Request) {

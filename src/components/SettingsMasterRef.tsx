@@ -86,7 +86,10 @@ export default function SettingsMasterRef() {
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Upsert failed');
     await load();
-    return json.upserted as number;
+    return {
+      upserted: json.upserted as number,
+      duplicatesCollapsed: (json.duplicatesCollapsed as number) || 0,
+    };
   };
 
   const importCsv = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,9 +113,9 @@ export default function SettingsMasterRef() {
           showToast('No rows with ASIN. ASIN is required (unique per account).');
           return;
         }
-        const n = await upsertRows(mapped);
+        const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
         showToast(
-          `Imported ${n} rows.${result.rejected.length ? ` ${result.rejected.length} rejected.` : ''}`
+          `Imported ${n} rows.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate ASIN(s).` : ''}${result.rejected.length ? ` ${result.rejected.length} rejected.` : ''}`
         );
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Import failed');
@@ -154,8 +157,10 @@ export default function SettingsMasterRef() {
         max_qty_per_box: null,
         product_name: r.productName || null,
       }));
-      const n = await upsertRows(mapped);
-      showToast(`Catalog PDF: upserted ${n} SKUs. Use Keepa enrich for missing weight/max.`);
+      const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
+      showToast(
+        `Catalog PDF: upserted ${n} SKUs.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate ASIN(s).` : ''} Use Keepa enrich for missing weight/max.`
+      );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'PDF parse failed');
     } finally {
@@ -196,7 +201,7 @@ export default function SettingsMasterRef() {
         showToast('Keepa returned no usable dims/weight for this batch.');
         return;
       }
-      const n = await upsertRows(updates);
+      const { upserted: n } = await upsertRows(updates);
       showToast(`Keepa enriched ${n} ASIN(s). ${need.length > 20 ? 'Run again for more.' : ''}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Keepa enrich failed');

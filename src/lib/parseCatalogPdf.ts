@@ -33,9 +33,9 @@ export function parseCatalogInventoryText(text: string): CatalogPdfRow[] {
     const sku = skuMatch[1].trim();
     if (!asin || !sku) continue;
 
-    const key = `${asin}::${sku}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // Unique key is ASIN per user — same ASIN with different SKUs still collapses.
+    if (seen.has(asin)) continue;
+    seen.add(asin);
 
     const beforeAsin = block.slice(0, asinMatch.index).trim();
     const productName = extractTitle(beforeAsin);
@@ -49,9 +49,8 @@ export function parseCatalogInventoryText(text: string): CatalogPdfRow[] {
     const skus = [...normalized.matchAll(SKU_RE)].map((m) => m[1].trim());
     const n = Math.min(asins.length, skus.length);
     for (let i = 0; i < n; i++) {
-      const key = `${asins[i]}::${skus[i]}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (seen.has(asins[i])) continue;
+      seen.add(asins[i]);
       rows.push({ asin: asins[i], sku: skus[i], productName: '' });
     }
   }
