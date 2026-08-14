@@ -859,7 +859,7 @@ export default function OrderHub() {
                         i * BULK_CONFIRM_CHUNK_SIZE,
                         (i + 1) * BULK_CONFIRM_CHUNK_SIZE
                       );
-                      const href = `${BULK_CONFIRM_BASE}?orderIds=${chunk.join(',')}`;
+                      const href = `${BULK_CONFIRM_BASE}/${chunk.join(';')}`;
                       return (
                         <li key={i}>
                           <a
