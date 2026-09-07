@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { formatDbError } from '@/lib/supabase/dbErrors';
+import { isAdminEmail } from '@/lib/adminEmails';
+import { wouldExceedAsinShareCaps } from '@/lib/masterReferenceAsinCap';
 import { capMaxQtyByWeight } from '@/lib/packing';
 
 export type MasterRefRow = {
@@ -29,6 +31,36 @@ type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 const SELECT_COLS = 'id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at';
 
 const MISSING_CONFLICT_TARGET = /no unique or exclusion constraint matching the on conflict/i;
+
+/**
+ * Block non-admin writes that would exceed shared-ASIN caps:
+ * at most 2 SKUs per ASIN, and at most 10 multi-SKU ASINs per account.
+ * Updating weight/max/name on an existing SKU that already uses that ASIN is allowed.
+ */
+async function checkAsinShareCaps(
+  supabase: SupabaseServerClient,
+  userId: string,
+  payload: UpsertRow[]
+): Promise<{ error: string; status: 403 | 500 } | null> {
+  // Need the full catalog so we can count existing multi-SKU ASINs account-wide.
+  const existing = await supabase
+    .from('master_reference')
+    .select('sku, asin')
+    .eq('user_id', userId);
+  if (existing.error) {
+    return { error: formatDbError(existing.error.message), status: 500 };
+  }
+
+  const existingRows = (existing.data ?? []).map((row) => ({
+    sku: String(row.sku ?? '').trim(),
+    asin: String(row.asin ?? '')
+      .trim()
+      .toUpperCase(),
+  }));
+
+  const capMessage = wouldExceedAsinShareCaps(existingRows, payload);
+  return capMessage ? { error: capMessage, status: 403 } : null;
+}
 
 /**
  * Upsert on (user_id, sku). Databases created before the SKU-uniqueness migration
@@ -159,6 +191,13 @@ export async function POST(request: Request) {
 
   if (payload.length === 0) {
     return NextResponse.json({ error: 'No valid rows (SKU required)' }, { status: 400 });
+  }
+
+  if (!isAdminEmail(user.email)) {
+    const capResult = await checkAsinShareCaps(supabase, user.id, payload);
+    if (capResult) {
+      return NextResponse.json({ error: capResult.error }, { status: capResult.status });
+    }
   }
 
   const result = await upsertBySku(supabase, user.id, payload);

@@ -55,7 +55,7 @@ Schema highlights:
 
 - `profiles` — optional `store_name` label (not Amazon identity verification)
 - `subscriptions` — `active` / `locked`, `setup_paid`, `current_period_end`
-- `master_reference` — unique `(user_id, sku)`; an ASIN may have multiple SKUs
+- `master_reference` — unique `(user_id, sku)`; normally one SKU per ASIN; up to 10 ASINs may be shared by 2 SKUs (app-enforced; `ADMIN_EMAILS` bypass)
 
 New signups get a profile + **locked** subscription via trigger (`setup_paid = false`).
 
