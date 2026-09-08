@@ -1,0 +1,125 @@
+.tracking-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 0 2rem;
+}
+
+.tracking-page-title {
+  font-size: 1.75rem;
+  margin-bottom: 0.5rem;
+  color: var(--sc-accent);
+  font-family: var(--font-display), Georgia, serif;
+}
+
+.tracking-page-desc,
+.tracking-page-hint,
+.tracking-page-meta {
+  color: var(--sc-muted);
+  font-size: 0.92rem;
+  margin-bottom: 0.65rem;
+}
+
+.tracking-page-hint a {
+  color: var(--sc-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tracking-page-error {
+  background: rgba(220, 80, 80, 0.15);
+  border: 1px solid rgba(220, 80, 80, 0.45);
+  color: #ffb4b4;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.tracking-page-empty {
+  background: var(--sc-surface);
+  border: 1px solid var(--sc-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  color: var(--sc-muted);
+}
+
+.tracking-page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+.tracking-chunk {
+  background: var(--sc-surface);
+  border: 1px solid var(--sc-border);
+  border-radius: 12px;
+  padding: 1rem 1.25rem 1.15rem;
+  backdrop-filter: blur(8px);
+}
+
+.tracking-ol {
+  margin: 0 0 0.85rem;
+  padding-left: 1.5rem;
+  list-style: decimal;
+}
+
+.tracking-row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1.2fr) minmax(8rem, 1fr) auto;
+  gap: 0.75rem 1rem;
+  align-items: baseline;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--sc-border) 55%, transparent);
+  font-size: 0.9rem;
+}
+
+.tracking-row:last-child {
+  border-bottom: none;
+}
+
+.tracking-tn {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--sc-text);
+  word-break: break-all;
+}
+
+.tracking-name {
+  color: var(--sc-muted);
+}
+
+.tracking-when {
+  color: var(--sc-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  justify-self: end;
+}
+
+.tracking-usps-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--sc-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--sc-accent) 14%, transparent);
+  color: var(--sc-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.tracking-usps-link:hover {
+  background: color-mix(in srgb, var(--sc-accent) 28%, transparent);
+  border-color: var(--sc-accent);
+}
+
+@media (max-width: 720px) {
+  .tracking-row {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .tracking-when {
+    justify-self: start;
+  }
+}

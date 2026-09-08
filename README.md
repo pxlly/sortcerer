@@ -1,6 +1,6 @@
 # Sortcerer (sortcerer.net)
 
-Amazon FBM Order Hub SaaS: unshipped orders → shipping CSV, label PDF split with smaller header fonts, Keepa auto-fill for weight / max units per box, catalog PDF import, and Trybit paywall ($300 setup, then $175/mo).
+Amazon FBM Order Hub SaaS: unshipped orders → shipping CSV, label PDF split with smaller header fonts, Keepa auto-fill for weight / max units per box, catalog PDF import, persisted tracking numbers with USPS bulk links, and Trybit paywall ($300 setup, then $175/mo).
 
 ## Stack
 
@@ -56,6 +56,7 @@ Schema highlights:
 - `profiles` — optional `store_name` label (not Amazon identity verification)
 - `subscriptions` — `active` / `locked`, `setup_paid`, `current_period_end`
 - `master_reference` — unique `(user_id, sku)`; normally one SKU per ASIN; up to 10 ASINs may be shared by 2 SKUs (app-enforced; `ADMIN_EMAILS` bypass)
+- `tracking_numbers` — unique `(user_id, tracking_number)`; saved from Order Hub tracking uploads; listed on `/tracking` with USPS bulk links every 35
 
 New signups get a profile + **locked** subscription via trigger (`setup_paid = false`).
 
@@ -73,6 +74,10 @@ set setup_paid = true
 where setup_paid = false
   and (last_invoice_id is not null or status = 'active' or current_period_end is not null);
 ```
+
+### Existing project migration (tracking numbers)
+
+If you already ran an older `schema.sql` without `tracking_numbers`, run [`supabase/migrations/20260908_tracking_numbers.sql`](./supabase/migrations/20260908_tracking_numbers.sql) once in the SQL Editor (or re-run the full [`supabase/schema.sql`](./supabase/schema.sql)).
 
 ### Dev unlock (no Trybit yet)
 

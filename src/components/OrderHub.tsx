@@ -732,7 +732,7 @@ export default function OrderHub() {
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const text = String(reader.result);
       const trackingNumbers = text
         .split(/\r?\n/)
@@ -752,7 +752,30 @@ export default function OrderHub() {
       a.download = `sortcerer-tracking-${new Date().toISOString().slice(0, 10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-      showToast('Tracking CSV downloaded.');
+
+      const persistRows = trackingNumbers.map((tn, i) => ({
+        tracking_number: tn,
+        recipient_name: (csvRows[i]?.toName || '').trim() || null,
+      }));
+      try {
+        const res = await fetch('/api/tracking-numbers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: persistRows }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(
+            `Tracking CSV downloaded, but save failed: ${data.error || res.statusText}`
+          );
+          return;
+        }
+        showToast(
+          `Tracking CSV downloaded. Saved ${data.upserted ?? persistRows.length} tracking number(s).`
+        );
+      } catch {
+        showToast('Tracking CSV downloaded, but saving tracking numbers failed.');
+      }
     };
     reader.readAsText(file, 'UTF-8');
   };
@@ -1032,7 +1055,11 @@ export default function OrderHub() {
         <p className="order-hub-min-orders-desc">
           Upload one tracking number per line, in the same order as the CSV rows
           {fileOrderOnly ? '.' : ' and label PDF pages.'} We will download a CSV mapping recipient
-          name to tracking number.
+          name to tracking number and save the numbers to{' '}
+          <a href="/tracking" style={{ color: 'var(--sc-accent)' }}>
+            Tracking
+          </a>
+          .
         </p>
         <input
           ref={trackingTxtRef}

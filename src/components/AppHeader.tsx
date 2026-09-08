@@ -32,6 +32,9 @@ export default function AppHeader() {
         <Link href="/hub" className={pathname.startsWith('/hub') ? 'active' : ''}>
           Order Hub
         </Link>
+        <Link href="/tracking" className={pathname.startsWith('/tracking') ? 'active' : ''}>
+          Tracking
+        </Link>
         <Link href="/settings" className={pathname.startsWith('/settings') ? 'active' : ''}>
           Settings
         </Link>
