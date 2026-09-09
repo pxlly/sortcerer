@@ -80,6 +80,21 @@ where older.user_id = newer.user_id
 alter table public.master_reference
   drop constraint if exists master_reference_user_id_asin_key;
 
+-- Drop any uniquely-named unique (user_id, asin) leftovers.
+do $$
+declare r record;
+begin
+  for r in
+    select conname from pg_constraint
+    where conrelid = 'public.master_reference'::regclass
+      and contype = 'u'
+      and pg_get_constraintdef(oid) ilike '%asin%'
+      and pg_get_constraintdef(oid) not ilike '%sku%'
+  loop
+    execute format('alter table public.master_reference drop constraint if exists %I', r.conname);
+  end loop;
+end $$;
+
 do $$
 begin
   if not exists (

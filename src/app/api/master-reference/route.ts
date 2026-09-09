@@ -5,7 +5,7 @@ import { capMaxQtyByWeight } from '@/lib/packing';
 
 export type MasterRefRow = {
   id?: string;
-  /** Optional: SKU is the identity. Stored as '' when unknown. */
+  /** Optional: SKU is the identity. Null/empty when unknown. */
   asin: string | null;
   sku: string;
   weight_lb: number | null;
@@ -16,7 +16,8 @@ export type MasterRefRow = {
 
 type UpsertRow = {
   user_id: string;
-  asin: string;
+  /** Empty ASIN is stored as null so pre-migration unique(user_id, asin) allows many blank rows. */
+  asin: string | null;
   sku: string;
   weight_lb: number | null;
   max_qty_per_box: number | null;
@@ -28,30 +29,19 @@ type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
 const SELECT_COLS = 'id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at';
 
-const MISSING_CONFLICT_TARGET = /no unique or exclusion constraint matching the on conflict/i;
+const ASIN_NOT_NULL = /null value in column ["']?asin["']?/i;
 
 /**
- * Upsert on (user_id, sku). Databases created before the SKU-uniqueness migration
- * have no matching constraint, so emulate the upsert row by row instead of failing.
+ * Prefer select-then-update/insert by SKU so saves work even when the live DB still
+ * lacks unique (user_id, sku) or still has unique (user_id, asin).
+ * Empty ASINs use null (multiple NULLs are allowed under unique); if asin is still
+ * NOT NULL, retry that row with ''.
  */
 async function upsertBySku(
   supabase: SupabaseServerClient,
   userId: string,
   payload: UpsertRow[]
 ): Promise<{ rows: MasterRefRow[]; error?: never } | { rows?: never; error: string }> {
-  const upserted = await supabase
-    .from('master_reference')
-    .upsert(payload, { onConflict: 'user_id,sku' })
-    .select(SELECT_COLS);
-
-  if (!upserted.error) return { rows: (upserted.data ?? []) as MasterRefRow[] };
-  if (
-    upserted.error.code !== '42P10' &&
-    !MISSING_CONFLICT_TARGET.test(upserted.error.message)
-  ) {
-    return { error: upserted.error.message };
-  }
-
   const existing = await supabase
     .from('master_reference')
     .select('id, sku')
@@ -69,7 +59,7 @@ async function upsertBySku(
 
   for (const row of payload) {
     const id = idBySku.get(row.sku);
-    const written = id
+    let written = id
       ? await supabase
           .from('master_reference')
           .update(row)
@@ -77,7 +67,27 @@ async function upsertBySku(
           .eq('user_id', userId)
           .select(SELECT_COLS)
       : await supabase.from('master_reference').insert(row).select(SELECT_COLS);
-    if (written.error) return { error: written.error.message };
+
+    // Pre-migration: asin may still be NOT NULL — retry with '' for blank ASINs only.
+    if (
+      written.error &&
+      ASIN_NOT_NULL.test(written.error.message) &&
+      (row.asin == null || row.asin === '')
+    ) {
+      const withEmpty = { ...row, asin: '' };
+      written = id
+        ? await supabase
+            .from('master_reference')
+            .update(withEmpty)
+            .eq('id', id)
+            .eq('user_id', userId)
+            .select(SELECT_COLS)
+        : await supabase.from('master_reference').insert(withEmpty).select(SELECT_COLS);
+    }
+
+    if (written.error) {
+      return { error: written.error.message };
+    }
     rows.push(...((written.data ?? []) as MasterRefRow[]));
   }
 
@@ -128,8 +138,10 @@ export async function POST(request: Request) {
   const bySku = new Map<string, UpsertRow>();
 
   for (const r of rows) {
-    // ASIN is optional; '' keeps pre-migration `asin text not null` columns writable.
-    const asin = String(r.asin ?? '').trim().toUpperCase();
+    // ASIN is optional. Prefer null over '' so unique(user_id, asin) still allows
+    // multiple blank-ASIN rows before the SKU-uniqueness migration runs.
+    const asinRaw = String(r.asin ?? '').trim().toUpperCase();
+    const asin = asinRaw || null;
     const sku = String(r.sku || '').trim();
     if (!sku) continue;
     const weightLb =
