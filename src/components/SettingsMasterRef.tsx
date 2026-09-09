@@ -403,9 +403,9 @@ export default function SettingsMasterRef() {
     <div className="settings-page">
       <h1 className="order-hub-title">Settings</h1>
       <p className="order-hub-min-orders-desc">
-        Master reference lives here (hidden from Order Hub). Each SKU is unique; ASIN is optional.
-        Normally one SKU per ASIN; up to 10 ASINs may be shared by 2 SKUs. Store name is optional
-        and cannot verify Amazon account ownership.
+        Master reference lives here (hidden from Order Hub). Each SKU is unique; ASIN is optional
+        and may be shared by any number of SKUs. Store name is optional and cannot verify Amazon
+        account ownership.
       </p>
       {toast && (
         <div className="order-hub-toast" role="alert">

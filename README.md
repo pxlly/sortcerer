@@ -55,7 +55,7 @@ Schema highlights:
 
 - `profiles` — optional `store_name` label (not Amazon identity verification)
 - `subscriptions` — `active` / `locked`, `setup_paid`, `current_period_end`
-- `master_reference` — unique `(user_id, sku)`; normally one SKU per ASIN; up to 10 ASINs may be shared by 2 SKUs (app-enforced; `ADMIN_EMAILS` bypass)
+- `master_reference` — unique `(user_id, sku)`; ASIN optional and may be shared by any number of SKUs
 - `tracking_numbers` — unique `(user_id, tracking_number)`; saved from Order Hub tracking uploads; listed on `/tracking` with USPS bulk links every 35
 
 New signups get a profile + **locked** subscription via trigger (`setup_paid = false`).
