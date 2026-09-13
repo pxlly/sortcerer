@@ -234,12 +234,12 @@ export function sortCsvRows(rows: CsvOutputRow[]): CsvOutputRow[] {
   });
 }
 
-/** CSV download layout for Order Hub .txt → CSV conversion. */
+/** CSV download layout for Order Hub .txt → CSV conversion. Simple shipping is the default. */
 export type CsvTemplate = 'sortcerer' | 'simple-shipping';
 
 export const CSV_TEMPLATE_OPTIONS: Array<{ value: CsvTemplate; label: string }> = [
-  { value: 'sortcerer', label: 'Sortcerer (standard)' },
-  { value: 'simple-shipping', label: 'Simple shipping' },
+  { value: 'simple-shipping', label: 'Standard (simple shipping)' },
+  { value: 'sortcerer', label: 'Alternative (Sortcerer)' },
 ];
 
 const CSV_HEADER_SORTCERER =
@@ -251,7 +251,7 @@ function escapeCsv(val: string | number): string {
   return s;
 }
 
-/** Sortcerer standard: header + company/phone/NOTES columns. */
+/** Sortcerer (alternative): header + company/phone/NOTES columns. */
 function csvRowsToSortcererString(rows: CsvOutputRow[]): string {
   const body = rows.map(
     (r) =>
@@ -280,7 +280,7 @@ function csvRowsToSortcererString(rows: CsvOutputRow[]): string {
 }
 
 /**
- * Simple shipping: no header. Columns match common orders CSV:
+ * Simple shipping (standard/default): no header. Columns match common orders CSV:
  * weight, from name, from addr1, from addr2, city, state, zip,
  * to name, to addr1, to addr2, city, state, zip.
  */
@@ -310,7 +310,7 @@ function csvRowsToSimpleShippingString(rows: CsvOutputRow[]): string {
 
 export function csvRowsToCsvString(
   rows: CsvOutputRow[],
-  template: CsvTemplate = 'sortcerer'
+  template: CsvTemplate = 'simple-shipping'
 ): string {
   if (template === 'simple-shipping') return csvRowsToSimpleShippingString(rows);
   return csvRowsToSortcererString(rows);

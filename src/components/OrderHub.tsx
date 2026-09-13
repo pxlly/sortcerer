@@ -182,7 +182,7 @@ export default function OrderHub() {
   } | null>(null);
   const [minOrdersFilter, setMinOrdersFilter] = useState(0);
   const [fileOrderOnly, setFileOrderOnly] = useState(false);
-  const [csvTemplate, setCsvTemplate] = useState<CsvTemplate>('sortcerer');
+  const [csvTemplate, setCsvTemplate] = useState<CsvTemplate>('simple-shipping');
   const [combineIntoOnePdf, setCombineIntoOnePdf] = useState(false);
   const [missingSkuModal, setMissingSkuModal] = useState<{
     sku: string;
