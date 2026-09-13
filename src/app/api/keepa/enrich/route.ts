@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { enrichAsinWithKeepa } from '@/lib/keepa';
+import { enrichAsinWithKeepa, type KeepaEnrichResult } from '@/lib/keepa';
+
+// Up to 20 sequential Keepa calls per request; the platform default of 10s can cut a batch off.
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -39,10 +42,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Max 20 ASINs per request' }, { status: 400 });
   }
 
-  const results = [];
+  // One bad ASIN must never turn the whole batch into a 500; report it per ASIN instead.
+  const results: KeepaEnrichResult[] = [];
   for (const asin of asins) {
-    results.push(await enrichAsinWithKeepa(asin));
+    try {
+      results.push(await enrichAsinWithKeepa(asin));
+    } catch (err: unknown) {
+      results.push({
+        asin,
+        error: err instanceof Error ? err.message : 'Keepa lookup failed',
+        retryable: true,
+      });
+    }
   }
 
-  return NextResponse.json({ results });
+  const refillIn = results.reduce<number | undefined>(
+    (max, r) => (typeof r.refillIn === 'number' ? Math.max(max ?? 0, r.refillIn) : max),
+    undefined
+  );
+
+  return NextResponse.json({ results, ...(refillIn != null ? { refillIn } : {}) });
 }

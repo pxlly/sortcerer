@@ -5,6 +5,7 @@ import { parseMasterReferenceCsv } from '@/lib/parseMasterReferenceCsv';
 import { parseCatalogInventory } from '@/lib/parseCatalogPdf';
 import { capMaxQtyByWeight } from '@/lib/packing';
 import { masterRefDuplicateKey, normalizeSku } from '@/lib/masterRefKeys';
+import type { KeepaEnrichResult } from '@/lib/keepa';
 
 type Row = {
   id?: string;
@@ -110,14 +111,66 @@ type EnrichProgress = {
   status: string;
 };
 
+type QueueItem = { asin: string; attempts: number };
+
+/** Everything needed to continue an enrichment run after it pauses or fails. */
+type EnrichRun = {
+  queue: QueueItem[];
+  total: number;
+  completed: number;
+  enriched: number;
+  failed: number;
+  summaryParts: string[];
+  dedupeNote: string;
+  sourceRows: Map<string, Row[]>;
+};
+
+type RunStop = { reason: 'paused' | 'error'; message?: string };
+
+type BatchResponse =
+  | { ok: true; results: KeepaEnrichResult[] }
+  | { ok: false; error: string; paused: boolean };
+
+type EnrichResponseBody = {
+  results?: KeepaEnrichResult[];
+  error?: string;
+  configured?: boolean;
+  refillIn?: number;
+};
+
 const ENRICH_BATCH_SIZE = 10;
 const ENRICH_BATCH_DELAY_MS = 35_000;
 const MAX_RATE_LIMIT_RETRIES = 3;
+/** Backoff between attempts when a whole batch request fails transiently (network, 5xx, 429). */
+const BATCH_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
+/** Longest we honour a Keepa refill hint before trying again. */
+const MAX_REFILL_WAIT_MS = 120_000;
+const PAUSE_POLL_MS = 500;
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isRateLimitError = (message: unknown) =>
   /(?:429|rate.?limit|token|refill|too many requests)/i.test(String(message || ''));
+
+const isRetryableResult = (result: KeepaEnrichResult) =>
+  result.retryable === true || isRateLimitError(result.error);
+
+/** Turn a Keepa `refillIn` hint into a wait (with a little slack), capped so a bad hint can't hang the run. */
+const refillWaitMs = (refillIn: number | undefined) =>
+  typeof refillIn === 'number' && refillIn > 0 ? Math.min(refillIn + 1_000, MAX_REFILL_WAIT_MS) : 0;
+
+const seconds = (ms: number) => `${Math.max(1, Math.round(ms / 1000))}s`;
+
+function buildSourceRows(all: Row[]): Map<string, Row[]> {
+  const sourceRows = new Map<string, Row[]>();
+  for (const row of all) {
+    if (!row.asin) continue;
+    const matches = sourceRows.get(row.asin) || [];
+    matches.push(row);
+    sourceRows.set(row.asin, matches);
+  }
+  return sourceRows;
+}
 
 export default function SettingsMasterRef() {
   const [rows, setRows] = useState<Row[]>([]);
@@ -127,6 +180,9 @@ export default function SettingsMasterRef() {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [keepaBusy, setKeepaBusy] = useState(false);
   const [enrichProgress, setEnrichProgress] = useState<EnrichProgress | null>(null);
+  const [pausedRun, setPausedRun] = useState<EnrichRun | null>(null);
+  const [pauseRequested, setPauseRequested] = useState(false);
+  const pauseRequestedRef = useRef(false);
   const csvRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
 
@@ -363,9 +419,250 @@ export default function SettingsMasterRef() {
     };
   };
 
+  const requestPause = () => {
+    pauseRequestedRef.current = true;
+    setPauseRequested(true);
+    setEnrichProgress((progress) =>
+      progress ? { ...progress, status: 'Pausing after the current batch…' } : progress
+    );
+  };
+
+  /** Sleep in short slices so a Pause click is honoured promptly. Resolves true if a pause was requested. */
+  const waitUnlessPaused = async (ms: number): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (pauseRequestedRef.current) return true;
+      await wait(Math.min(PAUSE_POLL_MS, end - Date.now()));
+    }
+    return pauseRequestedRef.current;
+  };
+
+  const reportProgress = (run: EnrichRun, status: string) =>
+    setEnrichProgress({
+      completed: run.completed,
+      total: run.total,
+      enriched: run.enriched,
+      failed: run.failed,
+      status,
+    });
+
+  /**
+   * POST one batch to the enrich route, retrying transient failures (network, 5xx, 429,
+   * rate-limit messages, unreadable bodies) with backoff. Honours Keepa's refill hint when present.
+   */
+  const fetchEnrichBatch = async (
+    asins: string[],
+    onRetry: (status: string) => void
+  ): Promise<BatchResponse> => {
+    let lastError = 'API enrichment failed';
+    for (let attempt = 0; ; attempt++) {
+      let retryable = false;
+      let refillIn: number | undefined;
+      try {
+        const res = await fetch('/api/keepa/enrich', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asins }),
+        });
+        let json: EnrichResponseBody | null = null;
+        try {
+          json = (await res.json()) as EnrichResponseBody;
+        } catch {
+          json = null;
+        }
+        if (res.ok && Array.isArray(json?.results)) {
+          return { ok: true, results: json.results };
+        }
+        lastError =
+          json?.error ||
+          (res.ok
+            ? 'API enrichment returned an unexpected response'
+            : `API enrichment failed (HTTP ${res.status})`);
+        refillIn = typeof json?.refillIn === 'number' ? json.refillIn : undefined;
+        // A missing key (configured: false), bad request, or expired session won't fix itself.
+        retryable =
+          json?.configured !== false &&
+          (json == null || res.status === 429 || res.status >= 500 || isRateLimitError(lastError));
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : 'Network error';
+        retryable = true;
+      }
+
+      if (!retryable || attempt >= BATCH_RETRY_DELAYS_MS.length) {
+        return { ok: false, error: lastError, paused: false };
+      }
+      const delay = Math.max(BATCH_RETRY_DELAYS_MS[attempt], refillWaitMs(refillIn));
+      onRetry(
+        `Retrying in ${seconds(delay)} (attempt ${attempt + 2} of ${BATCH_RETRY_DELAYS_MS.length + 1}) — ${lastError}`
+      );
+      if (await waitUnlessPaused(delay)) {
+        return { ok: false, error: lastError, paused: true };
+      }
+    }
+  };
+
+  /** Publish the final state of a run: either complete, or paused with the remaining queue kept for Resume. */
+  const finishRun = (run: EnrichRun, stop: RunStop | null, completeStatus: string) => {
+    let status = completeStatus;
+    if (stop) {
+      const remaining = run.queue.length;
+      status = `${stop.reason === 'error' ? 'Paused after an error' : 'Paused'} — ${run.completed}/${run.total} done, ${remaining} remaining.${remaining > 0 ? ' Click Resume to continue.' : ''}`;
+      if (stop.message) setError(stop.message);
+      setPausedRun(remaining > 0 ? { ...run, queue: [...run.queue] } : null);
+    }
+    pauseRequestedRef.current = false;
+    setPauseRequested(false);
+    setKeepaBusy(false);
+    reportProgress(run, status);
+  };
+
+  /** Drain the run's queue batch by batch. Mutates `run` so a paused run can be resumed where it left off. */
+  const runEnrichQueue = async (run: EnrichRun) => {
+    pauseRequestedRef.current = false;
+    setPauseRequested(false);
+    setPausedRun(null);
+    setKeepaBusy(true);
+    setError(null);
+
+    let stop: RunStop | null = null;
+    let completeStatus = 'Complete';
+
+    try {
+      while (run.queue.length > 0) {
+        // Leave the batch in the queue until the request succeeds so a failed batch is what Resume retries.
+        const batch = run.queue.slice(0, ENRICH_BATCH_SIZE);
+        reportProgress(run, `Processing ${plural(batch.length, 'ASIN')}…`);
+
+        const response = await fetchEnrichBatch(
+          batch.map((item) => item.asin),
+          (status) => reportProgress(run, status)
+        );
+        if (!response.ok) {
+          stop = response.paused ? { reason: 'paused' } : { reason: 'error', message: response.error };
+          break;
+        }
+        run.queue.splice(0, batch.length);
+
+        const resultsByAsin = new Map(
+          response.results.map((result) => [String(result.asin).trim().toUpperCase(), result])
+        );
+        const updates: Row[] = [];
+        let requeued = 0;
+        let tokensLeft: number | undefined;
+        let refillIn: number | undefined;
+
+        for (const item of batch) {
+          const result = resultsByAsin.get(item.asin.trim().toUpperCase());
+          const existingRows = run.sourceRows.get(item.asin);
+          if (!result || !existingRows?.length) {
+            run.completed++;
+            run.failed++;
+            continue;
+          }
+          if (typeof result.tokensLeft === 'number') tokensLeft = result.tokensLeft;
+          if (typeof result.refillIn === 'number') refillIn = result.refillIn;
+
+          // Transient per-ASIN failures go back on the queue; they are only counted once they resolve.
+          if (isRetryableResult(result) && item.attempts + 1 < MAX_RATE_LIMIT_RETRIES) {
+            run.queue.push({ asin: item.asin, attempts: item.attempts + 1 });
+            requeued++;
+            continue;
+          }
+
+          const hasUsableData = result.weightLb != null || result.maxQtyPerBox != null;
+          if (!hasUsableData) {
+            run.completed++;
+            run.failed++;
+            continue;
+          }
+
+          for (const existing of existingRows) {
+            if (existing.weight_lb != null && existing.max_qty_per_box != null) continue;
+            const nextWeight =
+              typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb;
+            const uncappedNextMax =
+              typeof result.maxQtyPerBox === 'number'
+                ? result.maxQtyPerBox
+                : existing.max_qty_per_box;
+            const nextMax =
+              nextWeight != null && uncappedNextMax != null
+                ? capMaxQtyByWeight(uncappedNextMax, nextWeight)
+                : uncappedNextMax;
+
+            updates.push({
+              asin: existing.asin,
+              sku: existing.sku,
+              weight_lb: nextWeight,
+              max_qty_per_box: nextMax,
+              product_name:
+                typeof result.productName === 'string' && result.productName
+                  ? result.productName
+                  : existing.product_name,
+            });
+          }
+          run.completed++;
+          run.enriched++;
+        }
+
+        if (updates.length > 0) await upsertRows(updates, false);
+
+        if (run.queue.length === 0) break;
+        if (pauseRequestedRef.current) {
+          stop = { reason: 'paused' };
+          break;
+        }
+
+        // Keepa refills tokens once a minute; if we were throttled or the bucket is nearly empty, wait for it.
+        const nextBatchSize = Math.min(ENRICH_BATCH_SIZE, run.queue.length);
+        const lowTokens = typeof tokensLeft === 'number' && tokensLeft < nextBatchSize;
+        const delay = Math.max(
+          ENRICH_BATCH_DELAY_MS,
+          requeued > 0 || lowTokens ? refillWaitMs(refillIn) : 0
+        );
+        reportProgress(
+          run,
+          `Waiting ${seconds(delay)} for API capacity before the next ${nextBatchSize}…`
+        );
+        if (await waitUnlessPaused(delay)) {
+          stop = { reason: 'paused' };
+          break;
+        }
+      }
+    } catch (err: unknown) {
+      stop = { reason: 'error', message: err instanceof Error ? err.message : 'API enrichment failed' };
+    }
+
+    await load();
+    if (!stop) {
+      const resultParts = [
+        ...run.summaryParts,
+        `${run.enriched} enriched`,
+        ...(run.failed ? [`${run.failed} unavailable`] : []),
+      ];
+      completeStatus = `Complete — ${resultParts.join(', ')}`;
+      showToast(
+        `API enrichment complete: ${resultParts.join(', ')}.${run.dedupeNote}`,
+        run.dedupeNote ? 8000 : 4000
+      );
+    }
+    finishRun(run, stop, completeStatus);
+  };
+
+  /** Continue a paused run from its remaining queue, skipping the dedupe/40 lb validation pass. */
+  const resumeEnrich = async () => {
+    if (!pausedRun || pausedRun.queue.length === 0 || keepaBusy) return;
+    setKeepaBusy(true);
+    setError(null);
+    reportProgress(pausedRun, 'Resuming…');
+    // Rows may have been edited while paused; look them up fresh but keep the queue and counters.
+    const fresh = await currentRows();
+    await runEnrichQueue({ ...pausedRun, queue: [...pausedRun.queue], sourceRows: buildSourceRows(fresh) });
+  };
+
   const enrichMissing = async () => {
     setKeepaBusy(true);
     setError(null);
+    setPausedRun(null);
     setEnrichProgress({
       completed: 0,
       total: 0,
@@ -419,152 +716,52 @@ export default function SettingsMasterRef() {
       status: 'Checking current values against the 40 lb box limit…',
     });
 
-    const sourceRows = new Map<string, Row[]>();
-    for (const row of validatedRows) {
-      if (!row.asin) continue;
-      const matches = sourceRows.get(row.asin) || [];
-      matches.push(row);
-      sourceRows.set(row.asin, matches);
-    }
-    const queue = need.map((asin) => ({ asin, attempts: 0 }));
-    let completed = 0;
-    let enriched = 0;
-    let failed = 0;
-    let finalStatus = 'Complete';
+    const run: EnrichRun = {
+      queue: need.map((asin) => ({ asin, attempts: 0 })),
+      total: need.length,
+      completed: 0,
+      enriched: 0,
+      failed: 0,
+      summaryParts,
+      dedupeNote,
+      sourceRows: buildSourceRows(validatedRows),
+    };
 
     try {
       if (corrections.length > 0) {
         await upsertRows(corrections, false);
         summaryParts.push(`corrected ${plural(corrections.length, 'max/box value')}`);
       }
-
-      if (need.length === 0) {
-        await load();
-        finalStatus =
-          summaryParts.length > 0
-            ? `Complete — ${summaryParts.join(', ')}`
-            : 'Complete — all values already pass';
-        showToast(
-          (summaryParts.length > 0
-            ? `Validation complete: ${summaryParts.join(', ')}.`
-            : 'All rows have complete values and pass the 40 lb limit.') + dedupeNote,
-          dedupeNote ? 8000 : 4000
-        );
-        return;
-      }
-
-      while (queue.length > 0) {
-        const batch = queue.splice(0, ENRICH_BATCH_SIZE);
-        setEnrichProgress({
-          completed,
-          total: need.length,
-          enriched,
-          failed,
-          status: `Processing ${batch.length} ASIN${batch.length === 1 ? '' : 's'}…`,
-        });
-
-        const res = await fetch('/api/keepa/enrich', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ asins: batch.map((item) => item.asin) }),
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'API enrichment failed');
-
-        const updates: Row[] = [];
-        const resultsByAsin = new Map<string, Record<string, unknown>>(
-          (json.results || []).map((result: Record<string, unknown>) => [
-            String(result.asin),
-            result,
-          ])
-        );
-
-        for (const item of batch) {
-          const result = resultsByAsin.get(item.asin);
-          const existingRows = sourceRows.get(item.asin);
-          if (!result || !existingRows?.length) {
-            completed++;
-            failed++;
-            continue;
-          }
-
-          if (
-            isRateLimitError(result.error) &&
-            item.attempts + 1 < MAX_RATE_LIMIT_RETRIES
-          ) {
-            queue.push({ asin: item.asin, attempts: item.attempts + 1 });
-            continue;
-          }
-
-          const hasUsableData = result.weightLb != null || result.maxQtyPerBox != null;
-          if (!hasUsableData) {
-            completed++;
-            failed++;
-            continue;
-          }
-
-          for (const existing of existingRows) {
-            if (existing.weight_lb != null && existing.max_qty_per_box != null) continue;
-            const nextWeight =
-              typeof result.weightLb === 'number' ? result.weightLb : existing.weight_lb;
-            const uncappedNextMax =
-              typeof result.maxQtyPerBox === 'number'
-                ? result.maxQtyPerBox
-                : existing.max_qty_per_box;
-            const nextMax =
-              nextWeight != null && uncappedNextMax != null
-                ? capMaxQtyByWeight(uncappedNextMax, nextWeight)
-                : uncappedNextMax;
-
-            updates.push({
-              asin: existing.asin,
-              sku: existing.sku,
-              weight_lb: nextWeight,
-              max_qty_per_box: nextMax,
-              product_name:
-                typeof result.productName === 'string' && result.productName
-                  ? result.productName
-                  : existing.product_name,
-            });
-          }
-          completed++;
-          enriched++;
-        }
-
-        if (updates.length > 0) await upsertRows(updates, false);
-
-        setEnrichProgress({
-          completed,
-          total: need.length,
-          enriched,
-          failed,
-          status:
-            queue.length > 0
-              ? `Waiting for API capacity before the next ${Math.min(ENRICH_BATCH_SIZE, queue.length)}…`
-              : 'Finishing…',
-        });
-
-        if (queue.length > 0) await wait(ENRICH_BATCH_DELAY_MS);
-      }
-
-      await load();
-      const resultParts = [
-        ...summaryParts,
-        `${enriched} enriched`,
-        ...(failed ? [`${failed} unavailable`] : []),
-      ];
-      finalStatus = `Complete — ${resultParts.join(', ')}`;
-      showToast(`API enrichment complete: ${resultParts.join(', ')}.${dedupeNote}`, dedupeNote ? 8000 : 4000);
     } catch (err: unknown) {
-      finalStatus = 'Stopped due to an error';
-      setError(err instanceof Error ? err.message : 'API enrichment failed');
+      // Nothing has been enriched yet; keep the full queue so Resume can still run it.
       await load();
-    } finally {
-      setKeepaBusy(false);
-      setEnrichProgress((progress) =>
-        progress ? { ...progress, completed, enriched, failed, status: finalStatus } : null
+      finishRun(
+        run,
+        { reason: 'error', message: err instanceof Error ? err.message : 'API enrichment failed' },
+        ''
       );
+      return;
     }
+
+    if (need.length === 0) {
+      await load();
+      showToast(
+        (summaryParts.length > 0
+          ? `Validation complete: ${summaryParts.join(', ')}.`
+          : 'All rows have complete values and pass the 40 lb limit.') + dedupeNote,
+        dedupeNote ? 8000 : 4000
+      );
+      finishRun(
+        run,
+        null,
+        summaryParts.length > 0
+          ? `Complete — ${summaryParts.join(', ')}`
+          : 'Complete — all values already pass'
+      );
+      return;
+    }
+
+    await runEnrichQueue(run);
   };
 
   const exportCsv = () => {
@@ -645,6 +842,25 @@ export default function SettingsMasterRef() {
           >
             {keepaBusy ? 'Enriching…' : 'API Enrich'}
           </button>
+          {keepaBusy && (
+            <button
+              type="button"
+              className="order-hub-btn"
+              disabled={pauseRequested}
+              onClick={requestPause}
+            >
+              {pauseRequested ? 'Pausing…' : 'Pause'}
+            </button>
+          )}
+          {!keepaBusy && pausedRun && pausedRun.queue.length > 0 && (
+            <button
+              type="button"
+              className="order-hub-btn order-hub-btn-primary"
+              onClick={resumeEnrich}
+            >
+              Resume ({pausedRun.queue.length} remaining)
+            </button>
+          )}
         </div>
         {enrichProgress && (
           <div className="settings-enrich-progress" role="status" aria-live="polite">
