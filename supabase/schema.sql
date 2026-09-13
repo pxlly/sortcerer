@@ -134,21 +134,71 @@ create policy "Users can delete own master ref"
   on public.master_reference for delete
   using (auth.uid() = user_id);
 
--- Tracking numbers (Order Hub uploads; unique per user)
+-- Tracking batches (one batch = one Order Hub workflow session that provided tracking numbers)
+create table if not exists public.tracking_batches (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  label text,
+  tracking_count int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists tracking_batches_user_created_idx
+  on public.tracking_batches (user_id, created_at desc);
+
+alter table public.tracking_batches enable row level security;
+
+drop policy if exists "Users can view own tracking batches" on public.tracking_batches;
+create policy "Users can view own tracking batches"
+  on public.tracking_batches for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own tracking batches" on public.tracking_batches;
+create policy "Users can insert own tracking batches"
+  on public.tracking_batches for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update own tracking batches" on public.tracking_batches;
+create policy "Users can update own tracking batches"
+  on public.tracking_batches for update
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can delete own tracking batches" on public.tracking_batches;
+create policy "Users can delete own tracking batches"
+  on public.tracking_batches for delete
+  using (auth.uid() = user_id);
+
+-- Tracking numbers (Order Hub uploads; unique per user; batch_id null only for legacy rows)
 create table if not exists public.tracking_numbers (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
   tracking_number text not null,
   recipient_name text,
-  batch_id uuid,
+  batch_id uuid references public.tracking_batches (id) on delete cascade,
   uploaded_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (user_id, tracking_number)
 );
 
+-- Bring pre-existing tracking_numbers tables up to date (idempotent; no-ops on fresh installs)
+alter table public.tracking_numbers
+  add column if not exists batch_id uuid references public.tracking_batches (id) on delete cascade;
+alter table public.tracking_numbers
+  add column if not exists uploaded_at timestamptz not null default now();
+alter table public.tracking_numbers
+  add column if not exists created_at timestamptz not null default now();
+alter table public.tracking_numbers
+  add column if not exists updated_at timestamptz not null default now();
+
 create index if not exists tracking_numbers_user_uploaded_idx
   on public.tracking_numbers (user_id, uploaded_at desc);
+
+create index if not exists tracking_numbers_user_created_idx
+  on public.tracking_numbers (user_id, created_at asc);
+
+create index if not exists tracking_numbers_batch_idx
+  on public.tracking_numbers (batch_id);
 
 alter table public.tracking_numbers enable row level security;
 

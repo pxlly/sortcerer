@@ -12,15 +12,24 @@ const SKU_UNIQUENESS_SQL =
   "notify pgrst, 'reload schema';\n" +
   'commit;';
 
-export function formatDbError(message: string): string {
+/** Postgres undefined_column / undefined_table and PostgREST schema-cache equivalents. */
+const MISSING_SCHEMA_CODES = new Set(['42703', '42P01', 'PGRST204', 'PGRST205']);
+
+export function formatDbError(message: string, code?: string | null): string {
   const lower = message.toLowerCase();
+  const missingObject =
+    lower.includes('does not exist') &&
+    (lower.includes('column') || lower.includes('relation') || lower.includes('table'));
   if (
+    (code && MISSING_SCHEMA_CODES.has(code)) ||
+    missingObject ||
     lower.includes('schema cache') ||
     (lower.includes('could not find the table') && lower.includes('public.'))
   ) {
     return (
-      'Database tables are missing (schema not applied). In the Supabase dashboard: SQL Editor → ' +
-      'New query → paste and Run supabase/schema.sql from the Sortcerer repo, wait a few seconds, then retry.'
+      'Database tables/columns are missing or out of date (schema not applied). In the Supabase ' +
+      'dashboard: SQL Editor → New query → paste and Run supabase/schema.sql from the Sortcerer repo ' +
+      `(it is idempotent and safe to re-run), wait a few seconds, then retry. Details: ${message}`
     );
   }
   if (

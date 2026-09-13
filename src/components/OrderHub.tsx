@@ -211,6 +211,8 @@ export default function OrderHub() {
   const labelsPdfRef = useRef<HTMLInputElement>(null);
   const labelsZipRef = useRef<HTMLInputElement>(null);
   const trackingTxtRef = useRef<HTMLInputElement>(null);
+  // Tracking batch for the current workflow session; reset whenever a new order file starts.
+  const trackingBatchIdRef = useRef<string | null>(null);
   const pendingConversionOrderRowsRef = useRef<ParsedOrderRow[] | null>(null);
   const pendingConversionOmittedRef = useRef<number>(0);
   const masterRefRef = useRef(masterRef);
@@ -437,6 +439,7 @@ export default function OrderHub() {
     setCsvRows(null);
     setConvertSummary(null);
     setBulkConfirmOrderIds(null);
+    trackingBatchIdRef.current = null;
     if (!file) return;
     const text = await file.text();
     const { rows: orderRows, missingColumns } = parseUnshippedTxt(text);
@@ -768,11 +771,19 @@ export default function OrderHub() {
         tracking_number: tn,
         recipient_name: (csvRows[i]?.toName || '').trim() || null,
       }));
+      const batchLabel = convertSummary
+        ? `${convertSummary.orders} order(s) · ${convertSummary.boxes} label(s)`
+        : `${csvRows.length} label(s)`;
       try {
         const res = await fetch('/api/tracking-numbers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: persistRows }),
+          body: JSON.stringify({
+            rows: persistRows,
+            // Every tracking file uploaded in this workflow session lands in the same batch.
+            batch_id: trackingBatchIdRef.current ?? undefined,
+            label: batchLabel,
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -781,8 +792,12 @@ export default function OrderHub() {
           );
           return;
         }
+        const savedBatchId: unknown = data.batch?.id ?? data.batch_id;
+        if (typeof savedBatchId === 'string' && savedBatchId) {
+          trackingBatchIdRef.current = savedBatchId;
+        }
         showToast(
-          `Tracking CSV downloaded. Saved ${data.upserted ?? persistRows.length} tracking number(s).`
+          `Tracking CSV downloaded. Saved ${data.upserted ?? persistRows.length} tracking number(s) to Tracking.`
         );
       } catch {
         showToast('Tracking CSV downloaded, but saving tracking numbers failed.');
@@ -893,6 +908,7 @@ export default function OrderHub() {
                   setCsvRows(null);
                   setConvertSummary(null);
                   setBulkConfirmOrderIds(null);
+                  trackingBatchIdRef.current = null;
                   setPdfError(null);
                   setCombineZipError(null);
                   setTrackingTxtError(null);

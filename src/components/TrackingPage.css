@@ -49,12 +49,120 @@
   margin-top: 1.25rem;
 }
 
-.tracking-chunk {
+.tracking-chunk,
+.tracking-batch {
   background: var(--sc-surface);
   border: 1px solid var(--sc-border);
   border-radius: 12px;
   padding: 1rem 1.25rem 1.15rem;
   backdrop-filter: blur(8px);
+}
+
+.tracking-batch-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.tracking-batch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.tracking-batch-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--sc-text);
+}
+
+.tracking-batch-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  color: var(--sc-muted);
+  font-size: 0.88rem;
+}
+
+.tracking-batch-count {
+  color: var(--sc-text);
+}
+
+.tracking-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.tracking-track-btn {
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  margin-top: 0;
+}
+
+.tracking-track-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tracking-delete-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid rgba(220, 80, 80, 0.45);
+  background: rgba(220, 80, 80, 0.1);
+  color: #ffb4b4;
+}
+
+.tracking-delete-btn:hover:not(:disabled) {
+  background: rgba(220, 80, 80, 0.22);
+}
+
+.tracking-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tracking-popup-note {
+  margin: 0.5rem 0 0;
+  color: var(--sc-muted);
+  font-size: 0.8rem;
+}
+
+.tracking-details {
+  margin-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, var(--sc-border) 55%, transparent);
+  padding-top: 0.6rem;
+}
+
+.tracking-details > summary {
+  cursor: pointer;
+  color: var(--sc-accent);
+  font-size: 0.88rem;
+  font-weight: 600;
+  user-select: none;
+}
+
+.tracking-chunk-links {
+  list-style: none;
+  margin: 0.65rem 0 0.85rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tracking-chunk-link {
+  margin-top: 0;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.82rem;
 }
 
 .tracking-ol {
@@ -121,5 +229,10 @@
 
   .tracking-when {
     justify-self: start;
+  }
+
+  .tracking-batch-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
