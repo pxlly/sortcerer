@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { parseMasterReferenceCsv } from '@/lib/parseMasterReferenceCsv';
-import { parseCatalogInventoryText } from '@/lib/parseCatalogPdf';
+import { parseCatalogInventory } from '@/lib/parseCatalogPdf';
 import { capMaxQtyByWeight } from '@/lib/packing';
+import { masterRefDuplicateKey, normalizeSku } from '@/lib/masterRefKeys';
 
 type Row = {
   id?: string;
@@ -13,7 +14,93 @@ type Row = {
   weight_lb: number | null;
   max_qty_per_box: number | null;
   product_name: string | null;
+  updated_at?: string;
 };
+
+/** 'merge': nulls never overwrite existing values (imports). 'replace': write as-is (row editor). */
+type WriteMode = 'merge' | 'replace';
+
+const hasValue = (v: unknown) => v != null && v !== '';
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** Look up rows whose SKU matches ignoring case/whitespace; an exact SKU match is listed first. */
+function indexBySku(existing: Row[]): Map<string, Row[]> {
+  const index = new Map<string, Row[]>();
+  for (const row of existing) {
+    const key = normalizeSku(row.sku);
+    const list = index.get(key) || [];
+    list.push(row);
+    index.set(key, list);
+  }
+  return index;
+}
+
+function findExisting(index: Map<string, Row[]>, sku: string): Row | undefined {
+  const matches = index.get(normalizeSku(sku));
+  if (!matches?.length) return undefined;
+  return matches.find((m) => m.sku === sku) ?? matches[0];
+}
+
+/** Collapse repeated SKUs (case/whitespace-insensitive) within one file, keeping the last occurrence. */
+function collapseBySku<T extends { sku: string }>(items: T[]): { items: T[]; collapsed: number } {
+  const byKey = new Map<string, T>();
+  for (const item of items) byKey.set(normalizeSku(item.sku), item);
+  return { items: [...byKey.values()], collapsed: items.length - byKey.size };
+}
+
+const completeness = (row: Row) =>
+  [row.weight_lb, row.max_qty_per_box, row.product_name, row.asin].filter(hasValue).length;
+
+/** Fill the keeper's blank fields from the duplicates; the keeper's own values always win. */
+function fillMissing(keeper: Row, others: Row[]): Row {
+  const merged: Row = { ...keeper };
+  for (const other of others) {
+    if (!hasValue(merged.asin) && hasValue(other.asin)) merged.asin = other.asin;
+    if (merged.weight_lb == null && other.weight_lb != null) merged.weight_lb = other.weight_lb;
+    if (merged.max_qty_per_box == null && other.max_qty_per_box != null) {
+      merged.max_qty_per_box = other.max_qty_per_box;
+    }
+    if (!hasValue(merged.product_name) && hasValue(other.product_name)) {
+      merged.product_name = other.product_name;
+    }
+  }
+  return merged;
+}
+
+const sameValues = (a: Row, b: Row) =>
+  (a.asin || null) === (b.asin || null) &&
+  a.weight_lb === b.weight_lb &&
+  a.max_qty_per_box === b.max_qty_per_box &&
+  (a.product_name || null) === (b.product_name || null);
+
+type DuplicateGroup = { keeper: Row; merged: Row; remove: Row[] };
+
+/**
+ * True 1-to-1 duplicates: same SKU AND same ASIN once trimmed/uppercased.
+ * Keep the most complete row (latest updated_at on ties) and merge the rest into it.
+ */
+function findExactDuplicates(all: Row[]): DuplicateGroup[] {
+  const groups = new Map<string, Row[]>();
+  for (const row of all) {
+    const key = masterRefDuplicateKey(row.sku, row.asin);
+    const list = groups.get(key) || [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  const result: DuplicateGroup[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const sorted = [...group].sort(
+      (a, b) =>
+        completeness(b) - completeness(a) ||
+        (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
+    );
+    const [keeper, ...remove] = sorted;
+    result.push({ keeper, merged: fillMissing(keeper, remove), remove });
+  }
+  return result;
+}
 
 type EnrichProgress = {
   completed: number;
@@ -43,35 +130,48 @@ export default function SettingsMasterRef() {
   const csvRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
 
-  const showToast = (m: string) => {
+  const showToast = (m: string, durationMs = 4000) => {
     setToast(m);
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), durationMs);
   };
+
+  const fetchRows = useCallback(async (): Promise<Row[]> => {
+    const res = await fetch('/api/master-reference');
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Failed to load');
+    return (json.rows || []) as Row[];
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/master-reference');
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed to load');
-      setRows(json.rows || []);
+      setRows(await fetchRows());
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Load failed');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchRows]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const upsertRows = async (incoming: Row[], reloadAfter = true) => {
+  /** Freshest copy of the master list for duplicate checks; falls back to what is on screen. */
+  const currentRows = async (): Promise<Row[]> => {
+    try {
+      return await fetchRows();
+    } catch {
+      return rows;
+    }
+  };
+
+  const upsertRows = async (incoming: Row[], reloadAfter = true, mode: WriteMode = 'merge') => {
     const res = await fetch('/api/master-reference', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rows: incoming }),
+      body: JSON.stringify({ rows: incoming, mode }),
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Upsert failed');
@@ -82,6 +182,17 @@ export default function SettingsMasterRef() {
     };
   };
 
+  const deleteRow = async (row: Row) => {
+    const param = row.id
+      ? `id=${encodeURIComponent(row.id)}`
+      : `sku=${encodeURIComponent(row.sku)}`;
+    const res = await fetch(`/api/master-reference?${param}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error((json as { error?: string }).error || 'Delete failed');
+    }
+  };
+
   const importCsv = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -90,22 +201,34 @@ export default function SettingsMasterRef() {
     reader.onload = async () => {
       try {
         const result = parseMasterReferenceCsv(String(reader.result));
-        const mapped: Row[] = result.rows
-          .filter((r) => r.sku)
-          .map((r) => ({
-            asin: r.asin ?? null,
-            sku: r.sku,
-            weight_lb: r.weight,
-            max_qty_per_box: r.maxQtyPerBox,
-            product_name: r.productName ?? null,
-          }));
-        if (mapped.length === 0) {
+        const { items: parsedRows, collapsed } = collapseBySku(result.rows.filter((r) => r.sku));
+        if (parsedRows.length === 0) {
           showToast('No rows with a SKU. SKU is required for every row.');
           return;
         }
-        const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
+
+        const existingIndex = indexBySku(await currentRows());
+        let newCount = 0;
+        let existingCount = 0;
+        const mapped: Row[] = parsedRows.map((r) => {
+          const match = findExisting(existingIndex, r.sku);
+          if (match) existingCount++;
+          else newCount++;
+          return {
+            asin: r.asin ?? null,
+            // Reuse the stored SKU so a case/whitespace variant updates that row instead of adding one.
+            sku: match ? match.sku : r.sku,
+            weight_lb: r.weight,
+            max_qty_per_box: r.maxQtyPerBox,
+            product_name: r.productName ?? null,
+          };
+        });
+        const { upserted: n } = await upsertRows(mapped);
         showToast(
-          `Imported ${n} rows.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate SKU(s).` : ''}${result.rejected.length ? ` ${result.rejected.length} rejected.` : ''}`
+          `Imported ${plural(n, 'row')}: ${newCount} new, ${existingCount} already in master reference (updated with CSV values).` +
+            (collapsed ? ` Collapsed ${plural(collapsed, 'repeated SKU')} in the file.` : '') +
+            (result.rejected.length ? ` ${result.rejected.length} rejected.` : ''),
+          8000
         );
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Import failed');
@@ -135,21 +258,61 @@ export default function SettingsMasterRef() {
           .join(' ');
         text += pageText + '\n';
       }
-      const parsed = parseCatalogInventoryText(text);
+      const { rows: parsed, duplicatesCollapsed } = parseCatalogInventory(text);
       if (parsed.length === 0) {
         showToast('No ASIN/SKU pairs found in PDF. Export Manage Inventory from Seller Central.');
         return;
       }
-      const mapped: Row[] = parsed.map((r) => ({
-        asin: r.asin,
-        sku: r.sku,
-        weight_lb: null,
-        max_qty_per_box: null,
-        product_name: r.productName || null,
-      }));
-      const { upserted: n, duplicatesCollapsed } = await upsertRows(mapped);
+
+      // Compare against the current master list: new SKUs are added; SKUs already present
+      // keep every existing value and only get blank ASIN / product name filled in.
+      const existingIndex = indexBySku(await currentRows());
+      const toWrite: Row[] = [];
+      let newCount = 0;
+      let existingCount = 0;
+      let filledCount = 0;
+      for (const r of parsed) {
+        const match = findExisting(existingIndex, r.sku);
+        if (!match) {
+          newCount++;
+          toWrite.push({
+            asin: r.asin,
+            sku: r.sku,
+            weight_lb: null,
+            max_qty_per_box: null,
+            product_name: r.productName || null,
+          });
+          continue;
+        }
+        existingCount++;
+        const fillAsin = !hasValue(match.asin) && !!r.asin;
+        const fillName = !hasValue(match.product_name) && !!r.productName;
+        if (fillAsin || fillName) {
+          filledCount++;
+          toWrite.push({
+            asin: fillAsin ? r.asin : match.asin,
+            sku: match.sku,
+            weight_lb: match.weight_lb,
+            max_qty_per_box: match.max_qty_per_box,
+            product_name: fillName ? r.productName : match.product_name,
+          });
+        }
+      }
+
+      if (toWrite.length > 0) await upsertRows(toWrite);
+
+      const kept =
+        existingCount > 0
+          ? ` (kept existing values${filledCount ? `; filled in blank ASIN/name on ${filledCount}` : ''})`
+          : '';
+      const inFile = duplicatesCollapsed
+        ? ` Collapsed ${plural(duplicatesCollapsed, 'repeated SKU')} in the PDF.`
+        : '';
       showToast(
-        `Catalog PDF: upserted ${n} SKUs.${duplicatesCollapsed ? ` Collapsed ${duplicatesCollapsed} duplicate SKU(s).` : ''} Use Keepa enrich for missing weight/max.`
+        newCount === 0
+          ? `Catalog PDF: no new products — all ${plural(existingCount, 'SKU')} are already in the master reference${kept}.${inFile}`
+          : `Imported ${plural(parsed.length, 'row')} from catalog PDF: ${newCount} new, ${existingCount} already in master reference${kept}.${inFile} Use API Enrich for missing weight/max.`,
+        10000
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'PDF parse failed');
@@ -158,12 +321,80 @@ export default function SettingsMasterRef() {
     }
   };
 
+  /**
+   * Remove true 1-to-1 duplicates (same normalized SKU + ASIN). The keeper is written
+   * first with fields merged from the others, then the others are deleted, so a failure
+   * midway never loses data. Per-group failures are reported but do not stop the caller.
+   */
+  const removeExactDuplicates = async (
+    all: Row[]
+  ): Promise<{ rows: Row[]; removed: number; failures: string[] }> => {
+    const groups = findExactDuplicates(all);
+    if (groups.length === 0) return { rows: all, removed: 0, failures: [] };
+
+    const removedRows = new Set<Row>();
+    const replacements = new Map<Row, Row>();
+    const failures: string[] = [];
+
+    for (const group of groups) {
+      try {
+        if (!sameValues(group.keeper, group.merged)) {
+          await upsertRows([group.merged], false);
+        }
+        replacements.set(group.keeper, group.merged);
+        for (const dup of group.remove) {
+          if (!dup.id && dup.sku === group.keeper.sku) {
+            throw new Error(`Cannot safely delete duplicate of ${dup.sku} without a row id`);
+          }
+          await deleteRow(dup);
+          removedRows.add(dup);
+        }
+      } catch (err: unknown) {
+        failures.push(
+          `${group.keeper.sku}: ${err instanceof Error ? err.message : 'duplicate cleanup failed'}`
+        );
+      }
+    }
+
+    return {
+      rows: all.filter((row) => !removedRows.has(row)).map((row) => replacements.get(row) ?? row),
+      removed: removedRows.size,
+      failures,
+    };
+  };
+
   const enrichMissing = async () => {
     setKeepaBusy(true);
     setError(null);
+    setEnrichProgress({
+      completed: 0,
+      total: 0,
+      enriched: 0,
+      failed: 0,
+      status: 'Scanning master reference for duplicate rows…',
+    });
+
+    // Step 1: quick duplicate scan. Never let this abort enrichment.
+    let baseRows = await currentRows();
+    let removedDuplicates = 0;
+    let dedupeNote = '';
+    try {
+      const dedupe = await removeExactDuplicates(baseRows);
+      baseRows = dedupe.rows;
+      removedDuplicates = dedupe.removed;
+      if (dedupe.failures.length > 0) {
+        console.warn('Master reference duplicate cleanup issues:', dedupe.failures);
+        dedupeNote = ` Duplicate cleanup skipped for ${plural(dedupe.failures.length, 'row')}: ${dedupe.failures[0]}`;
+      }
+    } catch (err: unknown) {
+      console.warn('Master reference duplicate cleanup failed:', err);
+      dedupeNote = ` Duplicate cleanup skipped: ${err instanceof Error ? err.message : 'unknown error'}`;
+    }
+    const summaryParts: string[] = [];
+    if (removedDuplicates > 0) summaryParts.push(`removed ${plural(removedDuplicates, 'duplicate row')}`);
 
     const corrections: Row[] = [];
-    const validatedRows = rows.map((row) => {
+    const validatedRows = baseRows.map((row) => {
       if (row.weight_lb == null || row.max_qty_per_box == null) return row;
       const cappedMax = capMaxQtyByWeight(row.max_qty_per_box, row.weight_lb);
       if (cappedMax === row.max_qty_per_box) return row;
@@ -204,18 +435,20 @@ export default function SettingsMasterRef() {
     try {
       if (corrections.length > 0) {
         await upsertRows(corrections, false);
+        summaryParts.push(`corrected ${plural(corrections.length, 'max/box value')}`);
       }
 
       if (need.length === 0) {
         await load();
         finalStatus =
-          corrections.length > 0
-            ? `Complete — corrected ${corrections.length} max/box value${corrections.length === 1 ? '' : 's'}`
+          summaryParts.length > 0
+            ? `Complete — ${summaryParts.join(', ')}`
             : 'Complete — all values already pass';
         showToast(
-          corrections.length > 0
-            ? `Validation complete: corrected ${corrections.length} max/box value${corrections.length === 1 ? '' : 's'} for the 40 lb limit.`
-            : 'All rows have complete values and pass the 40 lb limit.'
+          (summaryParts.length > 0
+            ? `Validation complete: ${summaryParts.join(', ')}.`
+            : 'All rows have complete values and pass the 40 lb limit.') + dedupeNote,
+          dedupeNote ? 8000 : 4000
         );
         return;
       }
@@ -315,10 +548,13 @@ export default function SettingsMasterRef() {
       }
 
       await load();
-      finalStatus = `Complete — ${enriched} enriched${corrections.length ? `, ${corrections.length} corrected` : ''}${failed ? `, ${failed} unavailable` : ''}`;
-      showToast(
-        `API enrichment complete: ${enriched} enriched${corrections.length ? `, ${corrections.length} corrected for 40 lb limit` : ''}${failed ? `, ${failed} unavailable` : ''}.`
-      );
+      const resultParts = [
+        ...summaryParts,
+        `${enriched} enriched`,
+        ...(failed ? [`${failed} unavailable`] : []),
+      ];
+      finalStatus = `Complete — ${resultParts.join(', ')}`;
+      showToast(`API enrichment complete: ${resultParts.join(', ')}.${dedupeNote}`, dedupeNote ? 8000 : 4000);
     } catch (err: unknown) {
       finalStatus = 'Stopped due to an error';
       setError(err instanceof Error ? err.message : 'API enrichment failed');
@@ -350,20 +586,19 @@ export default function SettingsMasterRef() {
   const saveEdit = async (row: Row) => {
     setError(null);
     try {
-      await upsertRows([row]);
+      // Explicit edits may intentionally clear a field, so write the row as-is.
+      await upsertRows([row], true, 'replace');
       showToast('Saved.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Save failed');
     }
   };
 
-  const remove = async (sku: string) => {
-    const res = await fetch(`/api/master-reference?sku=${encodeURIComponent(sku)}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) {
-      const json = await res.json();
-      setError(json.error || 'Delete failed');
+  const remove = async (row: Row) => {
+    try {
+      await deleteRow(row);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Delete failed');
       return;
     }
     await load();
@@ -467,7 +702,7 @@ function EditableRow({
 }: {
   row: Row;
   onSave: (r: Row) => void;
-  onDelete: (sku: string) => void;
+  onDelete: (r: Row) => void;
 }) {
   const [draft, setDraft] = useState(row);
   useEffect(() => setDraft(row), [row]);
@@ -517,7 +752,7 @@ function EditableRow({
         <button type="button" className="order-hub-btn" onClick={() => onSave(draft)}>
           Save
         </button>{' '}
-        <button type="button" className="order-hub-btn" onClick={() => onDelete(row.sku)}>
+        <button type="button" className="order-hub-btn" onClick={() => onDelete(row)}>
           Del
         </button>
       </td>

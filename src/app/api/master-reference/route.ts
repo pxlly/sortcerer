@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { formatDbError } from '@/lib/supabase/dbErrors';
 import { capMaxQtyByWeight } from '@/lib/packing';
+import { normalizeAsin } from '@/lib/masterRefKeys';
 
 export type MasterRefRow = {
   id?: string;
@@ -25,11 +26,33 @@ type UpsertRow = {
   updated_at: string;
 };
 
+/**
+ * 'merge' (default): null/blank fields in the payload never overwrite values the
+ * existing row already has — imports only fill in gaps.
+ * 'replace': write the payload as-is (used by the row editor so a field can be cleared).
+ */
+type WriteMode = 'merge' | 'replace';
+
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
 const SELECT_COLS = 'id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at';
 
 const ASIN_NOT_NULL = /null value in column ["']?asin["']?/i;
+
+function mergeIntoExisting(incoming: UpsertRow, existing: MasterRefRow): UpsertRow {
+  const weightLb = incoming.weight_lb ?? existing.weight_lb ?? null;
+  const requestedMax = incoming.max_qty_per_box ?? existing.max_qty_per_box ?? null;
+  return {
+    ...incoming,
+    asin: incoming.asin ?? (existing.asin ? normalizeAsin(existing.asin) : null),
+    weight_lb: weightLb,
+    max_qty_per_box:
+      weightLb != null && requestedMax != null
+        ? capMaxQtyByWeight(requestedMax, weightLb)
+        : requestedMax,
+    product_name: incoming.product_name ?? existing.product_name ?? null,
+  };
+}
 
 /**
  * Prefer select-then-update/insert by SKU so saves work even when the live DB still
@@ -40,11 +63,15 @@ const ASIN_NOT_NULL = /null value in column ["']?asin["']?/i;
 async function upsertBySku(
   supabase: SupabaseServerClient,
   userId: string,
-  payload: UpsertRow[]
-): Promise<{ rows: MasterRefRow[]; error?: never } | { rows?: never; error: string }> {
+  payload: UpsertRow[],
+  mode: WriteMode
+): Promise<
+  | { rows: MasterRefRow[]; inserted: number; updated: number; error?: never }
+  | { rows?: never; inserted?: never; updated?: never; error: string }
+> {
   const existing = await supabase
     .from('master_reference')
-    .select('id, sku')
+    .select(SELECT_COLS)
     .eq('user_id', userId)
     .in(
       'sku',
@@ -52,13 +79,17 @@ async function upsertBySku(
     );
   if (existing.error) return { error: existing.error.message };
 
-  const idBySku = new Map<string, string>(
-    (existing.data ?? []).map((r) => [r.sku as string, r.id as string])
+  const existingBySku = new Map<string, MasterRefRow>(
+    ((existing.data ?? []) as MasterRefRow[]).map((r) => [r.sku, r])
   );
   const rows: MasterRefRow[] = [];
+  let inserted = 0;
+  let updated = 0;
 
-  for (const row of payload) {
-    const id = idBySku.get(row.sku);
+  for (const incoming of payload) {
+    const current = existingBySku.get(incoming.sku);
+    const id = current?.id;
+    const row = current && mode === 'merge' ? mergeIntoExisting(incoming, current) : incoming;
     let written = id
       ? await supabase
           .from('master_reference')
@@ -88,10 +119,12 @@ async function upsertBySku(
     if (written.error) {
       return { error: written.error.message };
     }
+    if (id) updated++;
+    else inserted++;
     rows.push(...((written.data ?? []) as MasterRefRow[]));
   }
 
-  return { rows };
+  return { rows, inserted, updated };
 }
 
 export async function GET() {
@@ -111,7 +144,10 @@ export async function GET() {
   return NextResponse.json({ rows: data ?? [] });
 }
 
-/** Upsert by SKU (unique per user). Body: { rows: MasterRefRow[] } */
+/**
+ * Upsert by SKU (unique per user).
+ * Body: { rows: MasterRefRow[], mode?: 'merge' | 'replace' } — see WriteMode.
+ */
 export async function POST(request: Request) {
   const supabase = await createClient();
   const {
@@ -119,7 +155,7 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let body: { rows?: MasterRefRow[] };
+  let body: { rows?: MasterRefRow[]; mode?: string };
   try {
     body = await request.json();
   } catch {
@@ -130,6 +166,7 @@ export async function POST(request: Request) {
   if (rows.length === 0) {
     return NextResponse.json({ error: 'rows[] required' }, { status: 400 });
   }
+  const mode: WriteMode = body.mode === 'replace' ? 'replace' : 'merge';
 
   const now = new Date().toISOString();
   // Postgres rejects a single INSERT…ON CONFLICT that targets the same row twice.
@@ -140,8 +177,7 @@ export async function POST(request: Request) {
   for (const r of rows) {
     // ASIN is optional. Prefer null over '' so unique(user_id, asin) still allows
     // multiple blank-ASIN rows before the SKU-uniqueness migration runs.
-    const asinRaw = String(r.asin ?? '').trim().toUpperCase();
-    const asin = asinRaw || null;
+    const asin = normalizeAsin(r.asin) || null;
     const sku = String(r.sku || '').trim();
     if (!sku) continue;
     const weightLb =
@@ -173,7 +209,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No valid rows (SKU required)' }, { status: 400 });
   }
 
-  const result = await upsertBySku(supabase, user.id, payload);
+  const result = await upsertBySku(supabase, user.id, payload, mode);
   if (result.error) {
     return NextResponse.json({ error: formatDbError(result.error) }, { status: 500 });
   }
@@ -181,10 +217,13 @@ export async function POST(request: Request) {
   return NextResponse.json({
     rows: result.rows,
     upserted: payload.length,
+    inserted: result.inserted,
+    updated: result.updated,
     duplicatesCollapsed: Math.max(0, duplicatesCollapsed),
   });
 }
 
+/** Delete one row by `?id=` (preferred — exact row) or `?sku=`. */
 export async function DELETE(request: Request) {
   const supabase = await createClient();
   const {
@@ -193,14 +232,13 @@ export async function DELETE(request: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id')?.trim();
   const sku = searchParams.get('sku')?.trim();
-  if (!sku) return NextResponse.json({ error: 'sku required' }, { status: 400 });
+  if (!id && !sku) return NextResponse.json({ error: 'id or sku required' }, { status: 400 });
 
-  const { error } = await supabase
-    .from('master_reference')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('sku', sku);
+  let query = supabase.from('master_reference').delete().eq('user_id', user.id);
+  query = id ? query.eq('id', id) : query.eq('sku', sku as string);
+  const { error } = await query;
 
   if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ deleted: true });

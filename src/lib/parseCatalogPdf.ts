@@ -6,10 +6,18 @@
  *   SKU           1CUW-IWSN-EC0C
  */
 
+import { normalizeSku } from './masterRefKeys';
+
 export interface CatalogPdfRow {
   asin: string;
   sku: string;
   productName: string;
+}
+
+export interface CatalogPdfParseResult {
+  rows: CatalogPdfRow[];
+  /** Listings in the PDF that repeated a SKU already seen earlier in the same file. */
+  duplicatesCollapsed: number;
 }
 
 const ASIN_RE = /\bASIN\s+([A-Z0-9]{10})\b/gi;
@@ -19,10 +27,19 @@ const SKU_RE = /\bSKU\s+(\S+)/gi;
  * Extract catalog rows from plain text extracted from a PDF.
  */
 export function parseCatalogInventoryText(text: string): CatalogPdfRow[] {
+  return parseCatalogInventory(text).rows;
+}
+
+/**
+ * Like parseCatalogInventoryText, but also reports how many repeated SKUs
+ * (compared case-insensitively, ignoring whitespace) were collapsed.
+ */
+export function parseCatalogInventory(text: string): CatalogPdfParseResult {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ');
   const blocks = splitListingBlocks(normalized);
   const rows: CatalogPdfRow[] = [];
   const seen = new Set<string>();
+  let duplicatesCollapsed = 0;
 
   for (const block of blocks) {
     const asinMatch = /ASIN\s+([A-Z0-9]{10})/i.exec(block);
@@ -34,8 +51,12 @@ export function parseCatalogInventoryText(text: string): CatalogPdfRow[] {
     if (!asin || !sku) continue;
 
     // SKU is the catalog key; multiple SKUs may legitimately share one ASIN.
-    if (seen.has(sku)) continue;
-    seen.add(sku);
+    const key = normalizeSku(sku);
+    if (seen.has(key)) {
+      duplicatesCollapsed++;
+      continue;
+    }
+    seen.add(key);
 
     const beforeAsin = block.slice(0, asinMatch.index).trim();
     const productName = extractTitle(beforeAsin);
@@ -45,17 +66,22 @@ export function parseCatalogInventoryText(text: string): CatalogPdfRow[] {
 
   // Fallback: pairwise scan if block split missed rows
   if (rows.length === 0) {
+    duplicatesCollapsed = 0;
     const asins = [...normalized.matchAll(ASIN_RE)].map((m) => m[1].toUpperCase());
     const skus = [...normalized.matchAll(SKU_RE)].map((m) => m[1].trim());
     const n = Math.min(asins.length, skus.length);
     for (let i = 0; i < n; i++) {
-      if (seen.has(skus[i])) continue;
-      seen.add(skus[i]);
+      const key = normalizeSku(skus[i]);
+      if (seen.has(key)) {
+        duplicatesCollapsed++;
+        continue;
+      }
+      seen.add(key);
       rows.push({ asin: asins[i], sku: skus[i], productName: '' });
     }
   }
 
-  return rows;
+  return { rows, duplicatesCollapsed };
 }
 
 function splitListingBlocks(text: string): string[] {
