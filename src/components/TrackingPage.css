@@ -221,6 +221,121 @@
   border-color: var(--sc-accent);
 }
 
+/* Delete confirmation modal. Mirrors the Order Hub modal look (OrderHub.css is not
+   loaded on this route, so the overlay/panel rules are restated here). */
+.tracking-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 20, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.tracking-modal {
+  background: var(--sc-surface-solid);
+  border: 1px solid var(--sc-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  width: 100%;
+  min-width: 0;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.tracking-modal-title {
+  margin: 0 0 0.25rem;
+  color: var(--sc-accent);
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.tracking-modal-subject {
+  margin: 0 0 0.75rem;
+  color: var(--sc-text);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.tracking-modal-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.tracking-modal-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  cursor: pointer;
+  color: var(--sc-text);
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.tracking-modal-check input {
+  margin: 0.2rem 0 0;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  accent-color: var(--sc-accent);
+  cursor: pointer;
+}
+
+.tracking-modal-check input:disabled {
+  cursor: not-allowed;
+}
+
+.tracking-modal-error {
+  margin: 0.75rem 0 0;
+  font-size: 0.9rem;
+}
+
+.tracking-modal-actions {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  justify-content: flex-end;
+}
+
+/* Destructive action is intentionally quiet: small, plain, subtle red outline. */
+.tracking-modal-confirm-btn {
+  font-size: 0.85rem;
+  padding: 0.45rem 0.85rem;
+  border-color: rgba(220, 80, 80, 0.45);
+  color: #ffb4b4;
+  background: transparent;
+}
+
+.tracking-modal-confirm-btn:hover:not(:disabled) {
+  background: rgba(220, 80, 80, 0.16);
+  border-color: rgba(220, 80, 80, 0.75);
+  color: #ffd0d0;
+}
+
+.tracking-modal-confirm-btn:disabled {
+  opacity: 0.45;
+}
+
+/* Cancel is the safe default: filled primary, larger, right-most, auto-focused. */
+.tracking-modal-cancel-btn {
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.7rem 1.6rem;
+}
+
+.tracking-modal-cancel-btn:focus-visible {
+  outline: 2px solid var(--sc-accent);
+  outline-offset: 2px;
+}
+
 @media (max-width: 720px) {
   .tracking-row {
     grid-template-columns: 1fr;

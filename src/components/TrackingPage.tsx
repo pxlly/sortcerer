@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useId, useState } from 'react';
 import Link from 'next/link';
 import {
   USPS_BULK_CHUNK_SIZE,
@@ -51,13 +51,146 @@ async function fetchBatches(): Promise<{ batches: TrackingBatchGroup[]; error: s
   }
 }
 
-type BatchRowProps = {
+function batchTitle(batch: TrackingBatchGroup): string {
+  return batch.legacy ? 'Earlier uploads' : formatWhen(batch.created_at);
+}
+
+type DeleteBatchModalProps = {
   batch: TrackingBatchGroup;
-  onDelete: (batch: TrackingBatchGroup) => Promise<void>;
+  onCancel: () => void;
+  /** Resolves to an error message on failure, or null on success. */
+  onConfirm: (batch: TrackingBatchGroup) => Promise<string | null>;
 };
 
-function BatchRow({ batch, onDelete }: BatchRowProps) {
+/**
+ * Two-step confirmation for deleting a batch. Mounted only while open, so the
+ * checkbox/error state is fresh each time. Cancel is deliberately the prominent,
+ * auto-focused action; the destructive button stays low-emphasis and locked until
+ * both acknowledgements are checked.
+ */
+function DeleteBatchModal({ batch, onCancel, onConfirm }: DeleteBatchModalProps) {
+  const [ackDelete, setAckDelete] = useState(false);
+  const [ackIrreversible, setAckIrreversible] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const uid = useId();
+  const titleId = `${uid}-title`;
+  const descId = `${uid}-desc`;
+  const ackDeleteId = `${uid}-ack-delete`;
+  const ackIrreversibleId = `${uid}-ack-irreversible`;
+
+  const count = batch.rows.length;
+  const canConfirm = ackDelete && ackIrreversible && !deleting;
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !deleting) {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [deleting, onCancel]);
+
+  const handleConfirm = async () => {
+    if (!canConfirm) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const err = await onConfirm(batch);
+      if (err) {
+        setError(err);
+        setDeleting(false);
+      }
+      // On success the parent unmounts this modal; no state update needed.
+    } catch {
+      setError('Failed to delete tracking history');
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div
+      className="order-hub-modal-overlay tracking-modal-overlay"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !deleting) onCancel();
+      }}
+    >
+      <div
+        className="order-hub-modal tracking-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+      >
+        <h4 id={titleId} className="tracking-modal-title">
+          Are you sure you want to delete this tracking history?
+        </h4>
+        <p id={descId} className="tracking-modal-subject">
+          {batchTitle(batch)} — {count} label{count === 1 ? '' : 's'}
+          {!batch.legacy && batch.label ? ` · ${batch.label}` : ''}
+        </p>
+
+        <div className="tracking-modal-checks">
+          <label className="tracking-modal-check" htmlFor={ackDeleteId}>
+            <input
+              id={ackDeleteId}
+              type="checkbox"
+              checked={ackDelete}
+              disabled={deleting}
+              onChange={(e) => setAckDelete(e.target.checked)}
+            />
+            <span>Yes, delete this tracking history</span>
+          </label>
+          <label className="tracking-modal-check" htmlFor={ackIrreversibleId}>
+            <input
+              id={ackIrreversibleId}
+              type="checkbox"
+              checked={ackIrreversible}
+              disabled={deleting}
+              onChange={(e) => setAckIrreversible(e.target.checked)}
+            />
+            <span>I understand that this action cannot be reversed</span>
+          </label>
+        </div>
+
+        {error && (
+          <div className="order-hub-error tracking-modal-error" role="alert">
+            {error}
+          </div>
+        )}
+
+        <div className="form-actions tracking-modal-actions">
+          <button
+            type="button"
+            className="order-hub-btn tracking-modal-confirm-btn"
+            disabled={!canConfirm}
+            onClick={() => void handleConfirm()}
+          >
+            {deleting ? 'Deleting…' : 'Confirm delete'}
+          </button>
+          <button
+            type="button"
+            className="order-hub-btn order-hub-btn-primary tracking-modal-cancel-btn"
+            autoFocus
+            disabled={deleting}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type BatchRowProps = {
+  batch: TrackingBatchGroup;
+  onRequestDelete: (batch: TrackingBatchGroup) => void;
+};
+
+function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
   const [note, setNote] = useState<string | null>(null);
 
   const numbers = batch.rows.map((r) => r.tracking_number);
@@ -77,26 +210,11 @@ function BatchRow({ batch, onDelete }: BatchRowProps) {
     }
   };
 
-  const handleDelete = async () => {
-    const what = batch.legacy ? 'all earlier (ungrouped) tracking numbers' : 'this batch';
-    if (!window.confirm(`Delete ${what} (${count} tracking number(s))? This cannot be undone.`)) {
-      return;
-    }
-    setDeleting(true);
-    try {
-      await onDelete(batch);
-    } finally {
-      setDeleting(false);
-    }
-  };
-
   return (
     <section className="tracking-batch">
       <div className="tracking-batch-head">
         <div className="tracking-batch-info">
-          <div className="tracking-batch-title">
-            {batch.legacy ? 'Earlier uploads' : formatWhen(batch.created_at)}
-          </div>
+          <div className="tracking-batch-title">{batchTitle(batch)}</div>
           <div className="tracking-batch-meta">
             {batch.legacy ? (
               <span>Saved before batches existed · latest {formatWhen(batch.created_at)}</span>
@@ -122,10 +240,9 @@ function BatchRow({ batch, onDelete }: BatchRowProps) {
           <button
             type="button"
             className="tracking-delete-btn"
-            onClick={handleDelete}
-            disabled={deleting}
+            onClick={() => onRequestDelete(batch)}
           >
-            {deleting ? 'Deleting…' : 'Delete'}
+            Delete
           </button>
         </div>
       </div>
@@ -175,6 +292,7 @@ export default function TrackingPage() {
   const [batches, setBatches] = useState<TrackingBatchGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<TrackingBatchGroup | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,26 +307,24 @@ export default function TrackingPage() {
     };
   }, []);
 
-  const deleteBatch = useCallback(
-    async (batch: TrackingBatchGroup) => {
-      setError(null);
-      try {
-        const res = await fetch(
-          `/api/tracking-numbers?batch_id=${encodeURIComponent(batch.id)}`,
-          { method: 'DELETE' }
-        );
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setError(data.error || 'Failed to delete batch');
-          return;
-        }
-        setBatches((prev) => prev.filter((b) => b.id !== batch.id));
-      } catch {
-        setError('Failed to delete batch');
+  const deleteBatch = useCallback(async (batch: TrackingBatchGroup): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/tracking-numbers?batch_id=${encodeURIComponent(batch.id)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return data.error || 'Failed to delete tracking history';
       }
-    },
-    []
-  );
+      setBatches((prev) => prev.filter((b) => b.id !== batch.id));
+      setPendingDelete(null);
+      return null;
+    } catch {
+      return 'Failed to delete tracking history';
+    }
+  }, []);
+
+  const closeDeleteModal = useCallback(() => setPendingDelete(null), []);
 
   const totalNumbers = batches.reduce((sum, b) => sum + b.rows.length, 0);
 
@@ -241,10 +357,19 @@ export default function TrackingPage() {
           </p>
           <div className="tracking-page-list">
             {batches.map((batch) => (
-              <BatchRow key={batch.id} batch={batch} onDelete={deleteBatch} />
+              <BatchRow key={batch.id} batch={batch} onRequestDelete={setPendingDelete} />
             ))}
           </div>
         </>
+      )}
+
+      {pendingDelete && (
+        <DeleteBatchModal
+          key={pendingDelete.id}
+          batch={pendingDelete}
+          onCancel={closeDeleteModal}
+          onConfirm={deleteBatch}
+        />
       )}
     </div>
   );
