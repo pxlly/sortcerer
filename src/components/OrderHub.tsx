@@ -1074,12 +1074,10 @@ export default function OrderHub() {
         <h3>Step {fileOrderOnly ? '2' : '3'}: Tracking numbers</h3>
         <p className="order-hub-min-orders-desc">
           Upload one tracking number per line, in the same order as the CSV rows
-          {fileOrderOnly ? '.' : ' and label PDF pages.'} We will download a CSV mapping recipient
-          name to tracking number and save the numbers to{' '}
+          {fileOrderOnly ? '.' : ' and label PDF pages.'} All tracking numbers are saved in{' '}
           <a href="/tracking" style={{ color: 'var(--sc-accent)' }}>
             Tracking
           </a>
-          .
         </p>
         <input
           ref={trackingTxtRef}
