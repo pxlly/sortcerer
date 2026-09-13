@@ -6,12 +6,14 @@ import {
   expandOrderToCsvLines,
   sortCsvRows,
   csvRowsToCsvString,
+  CSV_TEMPLATE_OPTIONS,
   generateMultiUnitReportTxt,
   buildTrackingNumbersCsv,
   sanitizeFilename,
   selectPdfEntriesForCombine,
   type ParsedOrderRow,
   type CsvOutputRow,
+  type CsvTemplate,
   type MasterRefEntry,
 } from '@/lib/orderHub/orderHubUtils';
 import {
@@ -180,6 +182,7 @@ export default function OrderHub() {
   } | null>(null);
   const [minOrdersFilter, setMinOrdersFilter] = useState(0);
   const [fileOrderOnly, setFileOrderOnly] = useState(false);
+  const [csvTemplate, setCsvTemplate] = useState<CsvTemplate>('sortcerer');
   const [combineIntoOnePdf, setCombineIntoOnePdf] = useState(false);
   const [missingSkuModal, setMissingSkuModal] = useState<{
     sku: string;
@@ -473,12 +476,20 @@ export default function OrderHub() {
 
   const downloadCsv = () => {
     if (!csvRows || csvRows.length === 0) return;
-    const csv = csvRowsToCsvString(csvRows);
+    const csv = csvRowsToCsvString(csvRows, csvTemplate);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${fileOrderOnly ? 'sortcerer-file-order-' : 'sortcerer-'}${new Date().toISOString().slice(0, 10)}.csv`;
+    const prefix =
+      csvTemplate === 'simple-shipping'
+        ? fileOrderOnly
+          ? 'orders-file-order-'
+          : 'orders-'
+        : fileOrderOnly
+          ? 'sortcerer-file-order-'
+          : 'sortcerer-';
+    a.download = `${prefix}${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -922,7 +933,21 @@ export default function OrderHub() {
             {convertSummary.ordersFilteredOut
               ? ` · ${convertSummary.ordersFilteredOut} filtered out`
               : ''}
-            <div style={{ marginTop: '0.75rem' }}>
+            <div className="order-hub-csv-download-row">
+              <label className="order-hub-csv-template">
+                CSV template
+                <select
+                  value={csvTemplate}
+                  onChange={(e) => setCsvTemplate(e.target.value as CsvTemplate)}
+                  aria-label="CSV template"
+                >
+                  {CSV_TEMPLATE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button type="button" className="order-hub-btn order-hub-btn-primary" onClick={downloadCsv}>
                 Download CSV
               </button>

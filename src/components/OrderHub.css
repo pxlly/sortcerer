@@ -147,6 +147,32 @@
   font-size: 0.9rem;
 }
 
+.order-hub-csv-download-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+  margin-top: 0.75rem;
+}
+
+.order-hub-csv-template {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--sc-muted);
+  min-width: 180px;
+}
+
+.order-hub-csv-template select {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--sc-border);
+  border-radius: 8px;
+  background: var(--sc-surface);
+  color: var(--sc-text);
+  font-size: 0.9rem;
+}
+
 .order-hub-error {
   color: #ff6b7a;
   margin: 0.5rem 0;

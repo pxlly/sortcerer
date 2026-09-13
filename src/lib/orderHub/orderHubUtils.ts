@@ -234,7 +234,15 @@ export function sortCsvRows(rows: CsvOutputRow[]): CsvOutputRow[] {
   });
 }
 
-const CSV_HEADER =
+/** CSV download layout for Order Hub .txt → CSV conversion. */
+export type CsvTemplate = 'sortcerer' | 'simple-shipping';
+
+export const CSV_TEMPLATE_OPTIONS: Array<{ value: CsvTemplate; label: string }> = [
+  { value: 'sortcerer', label: 'Sortcerer (standard)' },
+  { value: 'simple-shipping', label: 'Simple shipping' },
+];
+
+const CSV_HEADER_SORTCERER =
   'WEIGHT,FROM NAME,FROM COMPANY,FROM PHONE,FROM ADDRESS 1,FROM ADDRESS 2,FROM CITY,FROM STATE,FROM ZIP,TO NAME,TO COMPANY,TO PHONE,TO ADDRESS 1,TO ADDRESS 2,TO CITY,TO STATE,TO ZIP,NOTES';
 
 function escapeCsv(val: string | number): string {
@@ -243,7 +251,8 @@ function escapeCsv(val: string | number): string {
   return s;
 }
 
-export function csvRowsToCsvString(rows: CsvOutputRow[]): string {
+/** Sortcerer standard: header + company/phone/NOTES columns. */
+function csvRowsToSortcererString(rows: CsvOutputRow[]): string {
   const body = rows.map(
     (r) =>
       [
@@ -267,7 +276,44 @@ export function csvRowsToCsvString(rows: CsvOutputRow[]): string {
         r.NOTES
       ].map(escapeCsv).join(',')
   );
-  return [CSV_HEADER, ...body].join('\n');
+  return [CSV_HEADER_SORTCERER, ...body].join('\n');
+}
+
+/**
+ * Simple shipping: no header. Columns match common orders CSV:
+ * weight, from name, from addr1, from addr2, city, state, zip,
+ * to name, to addr1, to addr2, city, state, zip.
+ */
+function csvRowsToSimpleShippingString(rows: CsvOutputRow[]): string {
+  return rows
+    .map((r) =>
+      [
+        r.WEIGHT,
+        r.fromName,
+        r.fromAddress1,
+        r.fromAddress2,
+        r.fromCity,
+        normalizeState(r.fromState),
+        normalizeZip(r.fromZip),
+        r.toName,
+        r.toAddress1,
+        r.toAddress2,
+        r.toCity,
+        normalizeState(r.toState),
+        normalizeZip(r.toZip),
+      ]
+        .map(escapeCsv)
+        .join(',')
+    )
+    .join('\n');
+}
+
+export function csvRowsToCsvString(
+  rows: CsvOutputRow[],
+  template: CsvTemplate = 'sortcerer'
+): string {
+  if (template === 'simple-shipping') return csvRowsToSimpleShippingString(rows);
+  return csvRowsToSortcererString(rows);
 }
 
 /**
