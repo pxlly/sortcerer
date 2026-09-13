@@ -905,7 +905,7 @@ export default function OrderHub() {
           </label>
         </div>
         <p className="order-hub-min-orders-desc">
-          Master reference is managed in Settings. Missing weight/max qty auto-fills via Keepa when an
+          Master reference is managed in Settings. Missing weight/max qty auto-fills via the API when an
           ASIN is known.
         </p>
         <input
@@ -1010,12 +1010,7 @@ export default function OrderHub() {
             </label>
           </div>
           <p className="order-hub-min-orders-desc">
-            Upload a single PDF with one label per CSV row, in the same order as the CSV. We split
-            by product and add header pages
-            {combineIntoOnePdf
-              ? ', then merge everything into one combined PDF.'
-              : ', then download a ZIP of separate product PDFs plus multi-unit-report.txt.'}{' '}
-            Header pages use a smaller font so long titles fit.
+            Upload a single PDF with one label per CSV row, in the same order as the CSV.
           </p>
           <input
             ref={labelsPdfRef}
