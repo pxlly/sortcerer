@@ -22,6 +22,7 @@ import {
   validateFromAddress,
   type DefaultFromAddress,
 } from '@/lib/shippingStorage';
+import { parseTrackingFile } from '@/lib/orderHub/parseTrackingFile';
 import { normalizeState, normalizeZip } from '@/lib/addressNormalize';
 import { capMaxQtyByWeight } from '@/lib/packing';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
@@ -741,24 +742,34 @@ export default function OrderHub() {
     setTrackingTxtError(null);
     if (!file || !csvRows?.length) {
       setTrackingTxtError(
-        'Generate and download CSV first, then upload the tracking numbers file.'
+        'Generate and download CSV first, then upload the tracking numbers txt/csv file.'
       );
       return;
     }
     const reader = new FileReader();
     reader.onload = async () => {
       const text = String(reader.result);
-      const trackingNumbers = text
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
+      const parsed = parseTrackingFile(text, file.name);
+      const trackingNumbers = parsed.entries.map((e) => e.trackingNumber);
+      if (!trackingNumbers.length) {
+        setTrackingTxtError('No tracking numbers found in the uploaded txt/csv file.');
+        return;
+      }
       if (trackingNumbers.length !== csvRows.length) {
+        const dupNote = parsed.duplicatesRemoved
+          ? ` (${parsed.duplicatesRemoved} duplicate(s) were ignored.)`
+          : '';
         setTrackingTxtError(
-          `Tracking file has ${trackingNumbers.length} line(s) but CSV has ${csvRows.length} row(s). They must match (one tracking per CSV row, same order).`
+          `Tracking file has ${trackingNumbers.length} tracking number(s) but CSV has ${csvRows.length} row(s). They must match (one tracking per CSV row, same order).${dupNote}`
         );
         return;
       }
-      const csv = buildTrackingNumbersCsv(csvRows, trackingNumbers);
+      // Names supplied inside the file (CSV column or "Name : tracking") beat positional matching.
+      const recipientNames = trackingNumbers.map(
+        (_, i) => (parsed.entries[i].recipientName || csvRows[i]?.toName || '').trim()
+      );
+      const rowsWithNames = csvRows.map((row, i) => ({ ...row, toName: recipientNames[i] }));
+      const csv = buildTrackingNumbersCsv(rowsWithNames, trackingNumbers);
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -769,7 +780,7 @@ export default function OrderHub() {
 
       const persistRows = trackingNumbers.map((tn, i) => ({
         tracking_number: tn,
-        recipient_name: (csvRows[i]?.toName || '').trim() || null,
+        recipient_name: recipientNames[i] || null,
       }));
       const batchLabel = convertSummary
         ? `${convertSummary.orders} order(s) · ${convertSummary.boxes} label(s)`
@@ -1089,7 +1100,9 @@ export default function OrderHub() {
       <section className="order-hub-section">
         <h3>Step {fileOrderOnly ? '2' : '3'}: Tracking numbers</h3>
         <p className="order-hub-min-orders-desc">
-          Upload one tracking number per line, in the same order as the CSV rows
+          Upload a tracking txt/csv: a .txt with one tracking number per line, or a .csv with
+          recipient name and tracking number columns (the downloaded &quot;Tracking Numbers&quot;
+          file works too), in the same order as the CSV rows
           {fileOrderOnly ? '.' : ' and label PDF pages.'} All tracking numbers are saved in{' '}
           <a href="/tracking" style={{ color: 'var(--sc-accent)' }}>
             Tracking
@@ -1098,7 +1111,7 @@ export default function OrderHub() {
         <input
           ref={trackingTxtRef}
           type="file"
-          accept=".txt,text/plain"
+          accept=".txt,.csv,text/plain,text/csv"
           onChange={handleTrackingTxt}
           disabled={!csvRows?.length}
           style={{ display: 'none' }}
@@ -1117,7 +1130,7 @@ export default function OrderHub() {
             cursor: csvRows?.length ? 'pointer' : 'not-allowed',
           }}
         >
-          Choose tracking numbers (.txt)
+          Upload tracking txt/csv
         </div>
         {trackingTxtError && <div className="order-hub-error">{trackingTxtError}</div>}
       </section>
