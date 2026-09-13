@@ -34,7 +34,6 @@ const isRateLimitError = (message: unknown) =>
 
 export default function SettingsMasterRef() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [storeName, setStoreName] = useState('');
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,20 +56,6 @@ export default function SettingsMasterRef() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to load');
       setRows(json.rows || []);
-
-      const { createClient } = await import('@/lib/supabase/client');
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('store_name')
-          .eq('user_id', user.id)
-          .maybeSingle();
-        setStoreName(data?.store_name || '');
-      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Load failed');
     } finally {
@@ -81,21 +66,6 @@ export default function SettingsMasterRef() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const saveStore = async () => {
-    const { createClient } = await import('@/lib/supabase/client');
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
-    const { error: err } = await supabase.from('profiles').upsert({
-      user_id: user.id,
-      store_name: storeName.trim() || null,
-    });
-    if (err) setError(err.message);
-    else showToast('Store name saved (one Amazon store per account).');
-  };
 
   const upsertRows = async (incoming: Row[], reloadAfter = true) => {
     const res = await fetch('/api/master-reference', {
@@ -404,8 +374,7 @@ export default function SettingsMasterRef() {
       <h1 className="order-hub-title">Settings</h1>
       <p className="order-hub-min-orders-desc">
         Master reference lives here (hidden from Order Hub). Each SKU is unique; ASIN is optional
-        and may be shared by any number of SKUs. Store name is optional and cannot verify Amazon
-        account ownership.
+        and may be shared by any number of SKUs.
       </p>
       {toast && (
         <div className="order-hub-toast" role="alert">
@@ -413,19 +382,6 @@ export default function SettingsMasterRef() {
         </div>
       )}
       {error && <div className="order-hub-error">{error}</div>}
-
-      <section className="order-hub-section">
-        <h3>Amazon store</h3>
-        <div className="order-hub-form-row">
-          <label>
-            Store name (optional)
-            <input value={storeName} onChange={(e) => setStoreName(e.target.value)} />
-          </label>
-        </div>
-        <button type="button" className="order-hub-btn order-hub-btn-primary" onClick={saveStore}>
-          Save store
-        </button>
-      </section>
 
       <section className="order-hub-section">
         <h3>Master reference</h3>
