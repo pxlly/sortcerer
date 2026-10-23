@@ -198,6 +198,14 @@ export default function OrderHub() {
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [combineZipError, setCombineZipError] = useState<string | null>(null);
   const [trackingTxtError, setTrackingTxtError] = useState<string | null>(null);
+  const [trackingSaveStatus, setTrackingSaveStatus] = useState<string | null>(null);
+  const [trackingSaving, setTrackingSaving] = useState(false);
+  // Last payload we tried to save, so a failed save (expired session, paused DB…) can be retried
+  // without re-uploading the file.
+  const [pendingTrackingSave, setPendingTrackingSave] = useState<{
+    rows: { tracking_number: string; recipient_name: string | null }[];
+    label: string;
+  } | null>(null);
   const [pdfProcessing, setPdfProcessing] = useState(false);
   const [combineZipProcessing, setCombineZipProcessing] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -441,6 +449,9 @@ export default function OrderHub() {
     setConvertSummary(null);
     setBulkConfirmOrderIds(null);
     trackingBatchIdRef.current = null;
+    setTrackingTxtError(null);
+    setTrackingSaveStatus(null);
+    setPendingTrackingSave(null);
     if (!file) return;
     const text = await file.text();
     const { rows: orderRows, missingColumns } = parseUnshippedTxt(text);
@@ -736,10 +747,107 @@ export default function OrderHub() {
     setCombineZipProcessing(false);
   };
 
+  /**
+   * POST tracking numbers to /api/tracking-numbers and show the outcome inline (sticky) and as a
+   * toast. Returns true on success. Treats a non-JSON / redirected response as a failure: a
+   * redirect to /login or /billing comes back as a 200 HTML page, which used to be mistaken for
+   * a successful save.
+   */
+  const saveTrackingRows = useCallback(
+    async (
+      rows: { tracking_number: string; recipient_name: string | null }[],
+      label: string,
+      prefix = ''
+    ): Promise<boolean> => {
+      setTrackingSaving(true);
+      setTrackingTxtError(null);
+      setTrackingSaveStatus(`${prefix}Saving ${rows.length} tracking number(s) to Tracking…`);
+      const fail = (message: string) => {
+        setPendingTrackingSave({ rows, label });
+        setTrackingSaveStatus(null);
+        setTrackingTxtError(
+          `${prefix}Tracking numbers were NOT saved to Tracking: ${message} Use "Retry save" below once that is fixed.`
+        );
+        showToast(`${prefix}Saving tracking numbers failed: ${message}`);
+        setTrackingSaving(false);
+        return false;
+      };
+      try {
+        const res = await fetch('/api/tracking-numbers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            rows,
+            // Every tracking file uploaded in this workflow session lands in the same batch.
+            batch_id: trackingBatchIdRef.current ?? undefined,
+            label,
+          }),
+        });
+        const contentType = res.headers.get('content-type') || '';
+        const isJson = contentType.includes('application/json');
+        const data: {
+          error?: string;
+          code?: string;
+          upserted?: number;
+          saved?: number;
+          moved?: number;
+          batch?: { id?: string };
+          batch_id?: string;
+        } = isJson ? await res.json().catch(() => ({})) : {};
+        if (res.redirected || !isJson) {
+          const target = (() => {
+            try {
+              return new URL(res.url).pathname;
+            } catch {
+              return '';
+            }
+          })();
+          if (target.startsWith('/login')) {
+            return fail('Your session has expired. Sign in again in another tab, then retry.');
+          }
+          if (target.startsWith('/billing')) {
+            return fail('Your Sortcerer subscription is not active. Renew in Billing, then retry.');
+          }
+          return fail(
+            `The server did not return a JSON response (HTTP ${res.status}${target ? ` from ${target}` : ''}).`
+          );
+        }
+        if (!res.ok) {
+          return fail(data.error || `HTTP ${res.status} ${res.statusText}`.trim());
+        }
+        const savedBatchId: unknown = data.batch?.id ?? data.batch_id;
+        if (typeof savedBatchId === 'string' && savedBatchId) {
+          trackingBatchIdRef.current = savedBatchId;
+        }
+        const total = typeof data.upserted === 'number' ? data.upserted : rows.length;
+        const saved = typeof data.saved === 'number' ? data.saved : total;
+        const moved = typeof data.moved === 'number' ? data.moved : 0;
+        const detail =
+          moved > 0
+            ? ` (${saved} new, ${moved} already saved earlier and moved into this session)`
+            : '';
+        setPendingTrackingSave(null);
+        setTrackingSaveStatus(`${prefix}Saved ${total} tracking number(s) to Tracking${detail}.`);
+        showToast(`${prefix}Saved ${total} tracking number(s) to Tracking.`);
+        setTrackingSaving(false);
+        return true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return fail(
+          /failed to fetch|network/i.test(message)
+            ? 'Could not reach the server (network error or the site is unreachable).'
+            : message
+        );
+      }
+    },
+    [showToast]
+  );
+
   const handleTrackingTxt = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     setTrackingTxtError(null);
+    setTrackingSaveStatus(null);
     if (!file || !csvRows?.length) {
       setTrackingTxtError(
         'Generate and download CSV first, then upload the tracking numbers txt/csv file.'
@@ -785,36 +893,17 @@ export default function OrderHub() {
       const batchLabel = convertSummary
         ? `${convertSummary.orders} order(s) · ${convertSummary.boxes} label(s)`
         : `${csvRows.length} label(s)`;
-      try {
-        const res = await fetch('/api/tracking-numbers', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            rows: persistRows,
-            // Every tracking file uploaded in this workflow session lands in the same batch.
-            batch_id: trackingBatchIdRef.current ?? undefined,
-            label: batchLabel,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          showToast(
-            `Tracking CSV downloaded, but save failed: ${data.error || res.statusText}`
-          );
-          return;
-        }
-        const savedBatchId: unknown = data.batch?.id ?? data.batch_id;
-        if (typeof savedBatchId === 'string' && savedBatchId) {
-          trackingBatchIdRef.current = savedBatchId;
-        }
-        showToast(
-          `Tracking CSV downloaded. Saved ${data.upserted ?? persistRows.length} tracking number(s) to Tracking.`
-        );
-      } catch {
-        showToast('Tracking CSV downloaded, but saving tracking numbers failed.');
-      }
+      await saveTrackingRows(persistRows, batchLabel, 'Tracking CSV downloaded. ');
+    };
+    reader.onerror = () => {
+      setTrackingTxtError('Could not read the uploaded file. Please try again.');
     };
     reader.readAsText(file, 'UTF-8');
+  };
+
+  const retryTrackingSave = () => {
+    if (!pendingTrackingSave || trackingSaving) return;
+    void saveTrackingRows(pendingTrackingSave.rows, pendingTrackingSave.label);
   };
 
   return (
@@ -923,6 +1012,8 @@ export default function OrderHub() {
                   setPdfError(null);
                   setCombineZipError(null);
                   setTrackingTxtError(null);
+                  setTrackingSaveStatus(null);
+                  setPendingTrackingSave(null);
                 }}
                 aria-label="File order only: no product sort, no labels PDF"
               />
@@ -1132,7 +1223,26 @@ export default function OrderHub() {
         >
           Upload tracking txt/csv
         </div>
-        {trackingTxtError && <div className="order-hub-error">{trackingTxtError}</div>}
+        {trackingTxtError && (
+          <div className="order-hub-error" role="alert">
+            {trackingTxtError}
+          </div>
+        )}
+        {trackingSaveStatus && (
+          <div className="order-hub-success order-hub-tracking-status" role="status">
+            {trackingSaveStatus}
+          </div>
+        )}
+        {pendingTrackingSave && !trackingSaving && (
+          <button
+            type="button"
+            className="order-hub-btn order-hub-btn-primary"
+            onClick={retryTrackingSave}
+            style={{ marginTop: '0.5rem' }}
+          >
+            Retry save ({pendingTrackingSave.rows.length} tracking number(s))
+          </button>
+        )}
       </section>
 
       {highQtyConfirmModal && (

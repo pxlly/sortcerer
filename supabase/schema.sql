@@ -191,6 +191,24 @@ alter table public.tracking_numbers
 alter table public.tracking_numbers
   add column if not exists updated_at timestamptz not null default now();
 
+-- `add column if not exists batch_id` above is a no-op on tables that already had a plain
+-- `batch_id uuid` column, so the foreign key (and ON DELETE CASCADE) may be missing. Detach any
+-- numbers that point at a batch that no longer exists, then (re)create the constraint.
+update public.tracking_numbers
+  set batch_id = null
+  where batch_id is not null
+    and not exists (select 1 from public.tracking_batches b where b.id = tracking_numbers.batch_id);
+alter table public.tracking_numbers
+  drop constraint if exists tracking_numbers_batch_id_fkey;
+alter table public.tracking_numbers
+  add constraint tracking_numbers_batch_id_fkey
+  foreign key (batch_id) references public.tracking_batches (id) on delete cascade;
+
+-- The API upserts on (user_id, tracking_number); a unique index satisfies ON CONFLICT and is
+-- idempotent to create (the inline `unique (...)` above only applies to brand-new tables).
+create unique index if not exists tracking_numbers_user_tn_uidx
+  on public.tracking_numbers (user_id, tracking_number);
+
 create index if not exists tracking_numbers_user_uploaded_idx
   on public.tracking_numbers (user_id, uploaded_at desc);
 

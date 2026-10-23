@@ -30,9 +30,14 @@ export async function updateSession(request: NextRequest) {
 
   const {
     data: { user },
+    error: authError,
   } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
+  // JSON API calls (fetch from the app) must never be answered with an HTML redirect:
+  // `fetch` follows the redirect, lands on /login or /billing with status 200, and the
+  // caller mistakes that page for a successful save.
+  const isApi = path.startsWith('/api/');
   const isPublic =
     path === '/' ||
     path.startsWith('/login') ||
@@ -41,6 +46,25 @@ export async function updateSession(request: NextRequest) {
     path.startsWith('/api/trybit/postback');
 
   if (!user && !isPublic) {
+    if (isApi) {
+      const detail = authError?.message?.toLowerCase() ?? '';
+      const unreachable =
+        detail.includes('fetch failed') ||
+        detail.includes('network') ||
+        detail.includes('timed out') ||
+        detail.includes('econnrefused') ||
+        detail.includes('paused') ||
+        detail.includes('unavailable');
+      return NextResponse.json(
+        {
+          error: unreachable
+            ? 'Could not reach the database/auth server (Supabase). If the project is on the free tier it may be paused — open the Supabase dashboard and click Restore, then retry.'
+            : 'Your session has expired. Sign in again, then retry.',
+          code: unreachable ? 'db_unreachable' : 'unauthorized',
+        },
+        { status: unreachable ? 503 : 401 }
+      );
+    }
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = '/login';
     redirectUrl.searchParams.set('next', path);
@@ -78,6 +102,15 @@ export async function updateSession(request: NextRequest) {
       new Date(sub.current_period_end).getTime() > now;
 
     if (!periodOk) {
+      if (isApi) {
+        return NextResponse.json(
+          {
+            error: 'Your Sortcerer subscription is not active. Open Billing to renew, then retry.',
+            code: 'subscription_inactive',
+          },
+          { status: 402 }
+        );
+      }
       const redirectUrl = request.nextUrl.clone();
       redirectUrl.pathname = '/billing';
       return NextResponse.redirect(redirectUrl);

@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { formatDbError } from '@/lib/supabase/dbErrors';
+import {
+  formatDbError,
+  isDbUnreachableError,
+  isMissingConflictTargetError,
+} from '@/lib/supabase/dbErrors';
 import {
   LEGACY_BATCH_ID,
   type TrackingBatch,
@@ -21,19 +25,58 @@ const BATCH_COLS = 'id, label, tracking_count, created_at';
 type DbError = { message: string; code?: string | null } | null;
 
 function dbErrorResponse(error: NonNullable<DbError>) {
+  const code = error.code ?? undefined;
   return NextResponse.json(
-    { error: formatDbError(error.message, error.code ?? undefined) },
-    { status: 500 }
+    { error: formatDbError(error.message, code), code: code ?? null },
+    { status: isDbUnreachableError(error.message, code) ? 503 : 500 }
   );
+}
+
+/** Unexpected throw (missing env, Supabase unreachable, …) → JSON instead of an HTML 500 page. */
+function unexpectedErrorResponse(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return dbErrorResponse({ message });
+}
+
+/** Resolve the auth user, mapping a dead Supabase connection to a clear 503 instead of a bare 401. */
+async function requireUser(supabase: Awaited<ReturnType<typeof createClient>>) {
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
+  if (user) return { user, response: null as NextResponse | null };
+  if (error && isDbUnreachableError(error.message, error.code)) {
+    return { user: null, response: dbErrorResponse({ message: error.message, code: error.code }) };
+  }
+  return {
+    user: null,
+    response: NextResponse.json(
+      { error: 'Your session has expired. Sign in again, then retry.', code: 'unauthorized' },
+      { status: 401 }
+    ),
+  };
+}
+
+const CHUNK = 500;
+function chunk<T>(items: T[], size = CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 /** Returns every batch (newest first) with its numbers, plus an "Earlier uploads" group for legacy rows. */
 export async function GET() {
+  try {
+    return await handleGet();
+  } catch (err) {
+    return unexpectedErrorResponse(err);
+  }
+}
+
+async function handleGet() {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { user, response } = await requireUser(supabase);
+  if (!user) return response!;
 
   const [batchesRes, rowsRes] = await Promise.all([
     supabase
@@ -96,11 +139,17 @@ export async function GET() {
  * Rows upsert by (user_id, tracking_number), so re-uploaded numbers move into this batch.
  */
 export async function POST(request: Request) {
+  try {
+    return await handlePost(request);
+  } catch (err) {
+    return unexpectedErrorResponse(err);
+  }
+}
+
+async function handlePost(request: Request) {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { user, response } = await requireUser(supabase);
+  if (!user) return response!;
 
   let body: { rows?: TrackingNumberRow[]; batch_id?: string; label?: string };
   try {
@@ -137,7 +186,25 @@ export async function POST(request: Request) {
       ? body.label.trim().slice(0, 200)
       : null;
 
+  // Which of these numbers does this user already have? Needed for the saved/moved counts and
+  // for the fallback path when the (user_id, tracking_number) unique constraint is missing.
+  const allTns = [...byTn.keys()];
+  const existingIds = new Map<string, string>(); // tracking_number -> row id
+  for (const part of chunk(allTns)) {
+    const found = await supabase
+      .from('tracking_numbers')
+      .select('id, tracking_number')
+      .eq('user_id', user.id)
+      .in('tracking_number', part);
+    if (found.error) return dbErrorResponse(found.error);
+    for (const r of (found.data ?? []) as { id: string; tracking_number: string }[]) {
+      existingIds.set(r.tracking_number, r.id);
+    }
+  }
+
+  // The batch row is created before any numbers so every saved number has a home.
   let batch: TrackingBatch | null = null;
+  let createdBatch = false;
   if (requestedBatchId && requestedBatchId !== LEGACY_BATCH_ID) {
     const existing = await supabase
       .from('tracking_batches')
@@ -157,28 +224,66 @@ export async function POST(request: Request) {
       .single();
     if (created.error) return dbErrorResponse(created.error);
     batch = created.data as TrackingBatch;
+    createdBatch = true;
   }
+  const batchId = batch.id;
 
-  const payload: UpsertRow[] = [...byTn.values()].map((r) => ({ ...r, batch_id: batch!.id }));
+  // If saving the numbers fails, don't leave an empty batch behind on the Tracking page.
+  const failWith = async (error: NonNullable<DbError>) => {
+    if (createdBatch) {
+      await supabase.from('tracking_batches').delete().eq('id', batchId).eq('user_id', user.id);
+    }
+    return dbErrorResponse(error);
+  };
 
+  const payload: UpsertRow[] = [...byTn.values()].map((r) => ({ ...r, batch_id: batchId }));
+  const newRows = payload.filter((r) => !existingIds.has(r.tracking_number));
+  const existingRows = payload.filter((r) => existingIds.has(r.tracking_number));
+
+  // Preferred path: one upsert. Re-uploaded numbers move into this batch (and refresh the
+  // recipient name) so the per-session "Track" button covers every label in the session.
   const upserted = await supabase
     .from('tracking_numbers')
     .upsert(payload, { onConflict: 'user_id,tracking_number' })
     .select(NUMBER_COLS);
-  if (upserted.error) return dbErrorResponse(upserted.error);
+
+  if (upserted.error && !isMissingConflictTargetError(upserted.error.message, upserted.error.code)) {
+    return failWith(upserted.error);
+  }
+
+  if (upserted.error) {
+    // The database has no unique (user_id, tracking_number) constraint (table predates schema.sql
+    // or the constraint was dropped), so ON CONFLICT cannot be used. Insert the new numbers and
+    // update the existing ones by id instead — nothing is rejected as a duplicate.
+    if (newRows.length > 0) {
+      for (const part of chunk(newRows)) {
+        const inserted = await supabase.from('tracking_numbers').insert(part);
+        if (inserted.error) return failWith(inserted.error);
+      }
+    }
+    for (const r of existingRows) {
+      const id = existingIds.get(r.tracking_number)!;
+      const updated = await supabase
+        .from('tracking_numbers')
+        .update({ batch_id: batchId, recipient_name: r.recipient_name })
+        .eq('id', id)
+        .eq('user_id', user.id);
+      if (updated.error) return failWith(updated.error);
+    }
+  }
 
   // Keep the denormalised count in sync (a session may upload more than one file).
   const counted = await supabase
     .from('tracking_numbers')
     .select('id', { count: 'exact', head: true })
     .eq('user_id', user.id)
-    .eq('batch_id', batch.id);
+    .eq('batch_id', batchId);
   const trackingCount = counted.error ? payload.length : counted.count ?? payload.length;
 
   const updatedBatch = await supabase
     .from('tracking_batches')
     .update({ tracking_count: trackingCount })
-    .eq('id', batch.id)
+    .eq('id', batchId)
     .eq('user_id', user.id)
     .select(BATCH_COLS)
     .single();
@@ -188,11 +293,27 @@ export async function POST(request: Request) {
     batch = { ...batch, tracking_count: trackingCount };
   }
 
+  let savedRows: TrackingNumberRow[] = (upserted.data ?? []) as TrackingNumberRow[];
+  if (upserted.error) {
+    const reread = await supabase
+      .from('tracking_numbers')
+      .select(NUMBER_COLS)
+      .eq('user_id', user.id)
+      .eq('batch_id', batchId)
+      .in('tracking_number', allTns.slice(0, CHUNK));
+    savedRows = (reread.data ?? []) as TrackingNumberRow[];
+  }
+
   return NextResponse.json({
-    rows: upserted.data ?? [],
+    rows: savedRows,
+    /** Total numbers from this request now attached to the batch (new + moved). */
     upserted: payload.length,
+    /** Numbers this user had never saved before. */
+    saved: newRows.length,
+    /** Numbers already saved earlier; they were moved into this batch rather than rejected. */
+    moved: existingRows.length,
     batch,
-    batch_id: batch.id,
+    batch_id: batchId,
   });
 }
 
@@ -201,11 +322,17 @@ export async function POST(request: Request) {
  * `?batch_id=legacy` deletes the user's numbers that have no batch.
  */
 export async function DELETE(request: Request) {
+  try {
+    return await handleDelete(request);
+  } catch (err) {
+    return unexpectedErrorResponse(err);
+  }
+}
+
+async function handleDelete(request: Request) {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { user, response } = await requireUser(supabase);
+  if (!user) return response!;
 
   const batchId = new URL(request.url).searchParams.get('batch_id')?.trim();
   if (!batchId) return NextResponse.json({ error: 'batch_id required' }, { status: 400 });
@@ -219,6 +346,15 @@ export async function DELETE(request: Request) {
     if (error) return dbErrorResponse(error);
     return NextResponse.json({ ok: true, batch_id: batchId });
   }
+
+  // Delete the numbers explicitly: tables created before the batch_id foreign key existed have
+  // no ON DELETE CASCADE, and orphaned numbers would otherwise reappear under "Earlier uploads".
+  const numbers = await supabase
+    .from('tracking_numbers')
+    .delete()
+    .eq('user_id', user.id)
+    .eq('batch_id', batchId);
+  if (numbers.error) return dbErrorResponse(numbers.error);
 
   const { error } = await supabase
     .from('tracking_batches')

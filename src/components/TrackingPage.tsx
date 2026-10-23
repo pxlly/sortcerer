@@ -40,7 +40,14 @@ function openAll(urls: string[]): number {
 
 async function fetchBatches(): Promise<{ batches: TrackingBatchGroup[]; error: string | null }> {
   try {
-    const res = await fetch('/api/tracking-numbers');
+    const res = await fetch('/api/tracking-numbers', { headers: { Accept: 'application/json' } });
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    if (res.redirected || !isJson) {
+      return {
+        batches: [],
+        error: 'Your session has expired or the server returned an unexpected page. Sign in again and reload.',
+      };
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return { batches: [], error: data.error || 'Failed to load tracking numbers' };

@@ -183,6 +183,10 @@
   margin-left: 0.5rem;
 }
 
+.order-hub-tracking-status {
+  margin: 0.5rem 0 0;
+}
+
 .order-hub-step1-header {
   display: flex;
   flex-wrap: wrap;
