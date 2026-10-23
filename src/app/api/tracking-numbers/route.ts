@@ -9,6 +9,7 @@ import {
   LEGACY_BATCH_ID,
   type TrackingBatch,
   type TrackingBatchGroup,
+  type TrackingMeta,
   type TrackingNumberRow,
 } from '@/lib/trackingBatches';
 
@@ -22,7 +23,24 @@ type UpsertRow = {
 const NUMBER_COLS = 'id, tracking_number, recipient_name, batch_id, created_at';
 const BATCH_COLS = 'id, label, tracking_count, created_at';
 
-type DbError = { message: string; code?: string | null } | null;
+type DbError = { message: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+
+/**
+ * Every failure is logged with enough context to diagnose it from the Vercel runtime logs
+ * (which step failed, for whom, how many rows) without exposing the tracking numbers themselves.
+ */
+function logFailure(step: string, context: Record<string, unknown>, error: NonNullable<DbError> | unknown) {
+  const err =
+    error && typeof error === 'object' && 'message' in error
+      ? {
+          message: String((error as { message: unknown }).message),
+          code: (error as { code?: unknown }).code ?? null,
+          details: (error as { details?: unknown }).details ?? null,
+          hint: (error as { hint?: unknown }).hint ?? null,
+        }
+      : { message: String(error) };
+  console.error(`[tracking-numbers] ${step} failed`, JSON.stringify({ ...context, error: err }));
+}
 
 function dbErrorResponse(error: NonNullable<DbError>) {
   const code = error.code ?? undefined;
@@ -33,21 +51,24 @@ function dbErrorResponse(error: NonNullable<DbError>) {
 }
 
 /** Unexpected throw (missing env, Supabase unreachable, …) → JSON instead of an HTML 500 page. */
-function unexpectedErrorResponse(err: unknown) {
+function unexpectedErrorResponse(method: string, err: unknown) {
+  logFailure(`${method} unexpected`, {}, err);
   const message = err instanceof Error ? err.message : String(err);
   return dbErrorResponse({ message });
 }
 
 /** Resolve the auth user, mapping a dead Supabase connection to a clear 503 instead of a bare 401. */
-async function requireUser(supabase: Awaited<ReturnType<typeof createClient>>) {
+async function requireUser(supabase: Awaited<ReturnType<typeof createClient>>, method: string) {
   const {
     data: { user },
     error,
   } = await supabase.auth.getUser();
   if (user) return { user, response: null as NextResponse | null };
   if (error && isDbUnreachableError(error.message, error.code)) {
+    logFailure(`${method} auth`, {}, error);
     return { user: null, response: dbErrorResponse({ message: error.message, code: error.code }) };
   }
+  console.warn(`[tracking-numbers] ${method} rejected: no session`, error?.message ?? '');
   return {
     user: null,
     response: NextResponse.json(
@@ -64,18 +85,22 @@ function chunk<T>(items: T[], size = CHUNK): T[][] {
   return out;
 }
 
-/** Returns every batch (newest first) with its numbers, plus an "Earlier uploads" group for legacy rows. */
+/**
+ * Returns every batch (newest first) with its numbers, plus an "Earlier uploads" group for legacy
+ * rows, and `meta` with raw per-table counts so the Tracking page can prove whether anything is
+ * stored for this account even when the grouped list comes back empty.
+ */
 export async function GET() {
   try {
     return await handleGet();
   } catch (err) {
-    return unexpectedErrorResponse(err);
+    return unexpectedErrorResponse('GET', err);
   }
 }
 
 async function handleGet() {
   const supabase = await createClient();
-  const { user, response } = await requireUser(supabase);
+  const { user, response } = await requireUser(supabase, 'GET');
   if (!user) return response!;
 
   const [batchesRes, rowsRes] = await Promise.all([
@@ -92,8 +117,14 @@ async function handleGet() {
       .order('tracking_number', { ascending: true }),
   ]);
 
-  if (batchesRes.error) return dbErrorResponse(batchesRes.error);
-  if (rowsRes.error) return dbErrorResponse(rowsRes.error);
+  if (batchesRes.error) {
+    logFailure('GET batches select', { userId: user.id }, batchesRes.error);
+    return dbErrorResponse(batchesRes.error);
+  }
+  if (rowsRes.error) {
+    logFailure('GET numbers select', { userId: user.id }, rowsRes.error);
+    return dbErrorResponse(rowsRes.error);
+  }
 
   const groups = new Map<string, TrackingBatchGroup>();
   for (const b of (batchesRes.data ?? []) as TrackingBatch[]) {
@@ -101,11 +132,23 @@ async function handleGet() {
   }
 
   const legacyRows: TrackingNumberRow[] = [];
+  let orphanedRows = 0;
   for (const row of (rowsRes.data ?? []) as TrackingNumberRow[]) {
     const group = row.batch_id ? groups.get(row.batch_id) : undefined;
     if (group) group.rows.push(row);
-    else legacyRows.push(row);
+    else {
+      if (row.batch_id) orphanedRows += 1;
+      legacyRows.push(row);
+    }
   }
+
+  const meta: TrackingMeta = {
+    numberCount: rowsRes.data?.length ?? 0,
+    batchCount: batchesRes.data?.length ?? 0,
+    unbatchedCount: legacyRows.length,
+    orphanedCount: orphanedRows,
+    emptyBatchCount: [...groups.values()].filter((g) => g.rows.length === 0).length,
+  };
 
   const batches: TrackingBatchGroup[] = [...groups.values()].map((g) => ({
     ...g,
@@ -128,7 +171,7 @@ async function handleGet() {
     });
   }
 
-  return NextResponse.json({ batches });
+  return NextResponse.json({ batches, meta });
 }
 
 /**
@@ -142,24 +185,26 @@ export async function POST(request: Request) {
   try {
     return await handlePost(request);
   } catch (err) {
-    return unexpectedErrorResponse(err);
+    return unexpectedErrorResponse('POST', err);
   }
 }
 
 async function handlePost(request: Request) {
   const supabase = await createClient();
-  const { user, response } = await requireUser(supabase);
+  const { user, response } = await requireUser(supabase, 'POST');
   if (!user) return response!;
 
   let body: { rows?: TrackingNumberRow[]; batch_id?: string; label?: string };
   try {
     body = await request.json();
-  } catch {
+  } catch (err) {
+    logFailure('POST body parse', { userId: user.id }, err);
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (rows.length === 0) {
+    console.warn('[tracking-numbers] POST rejected: rows[] empty', JSON.stringify({ userId: user.id }));
     return NextResponse.json({ error: 'rows[] required' }, { status: 400 });
   }
 
@@ -176,6 +221,10 @@ async function handlePost(request: Request) {
     });
   }
   if (byTn.size === 0) {
+    console.warn(
+      '[tracking-numbers] POST rejected: no valid numbers',
+      JSON.stringify({ userId: user.id, rows: rows.length })
+    );
     return NextResponse.json({ error: 'No valid tracking numbers' }, { status: 400 });
   }
 
@@ -185,6 +234,12 @@ async function handlePost(request: Request) {
     typeof body.label === 'string' && body.label.trim()
       ? body.label.trim().slice(0, 200)
       : null;
+  const logContext = {
+    userId: user.id,
+    rows: byTn.size,
+    requestedBatchId,
+    label,
+  };
 
   // Which of these numbers does this user already have? Needed for the saved/moved counts and
   // for the fallback path when the (user_id, tracking_number) unique constraint is missing.
@@ -196,7 +251,10 @@ async function handlePost(request: Request) {
       .select('id, tracking_number')
       .eq('user_id', user.id)
       .in('tracking_number', part);
-    if (found.error) return dbErrorResponse(found.error);
+    if (found.error) {
+      logFailure('POST existing-numbers select', logContext, found.error);
+      return dbErrorResponse(found.error);
+    }
     for (const r of (found.data ?? []) as { id: string; tracking_number: string }[]) {
       existingIds.set(r.tracking_number, r.id);
     }
@@ -212,8 +270,17 @@ async function handlePost(request: Request) {
       .eq('id', requestedBatchId)
       .eq('user_id', user.id)
       .maybeSingle();
-    if (existing.error) return dbErrorResponse(existing.error);
+    if (existing.error) {
+      logFailure('POST batch lookup', logContext, existing.error);
+      return dbErrorResponse(existing.error);
+    }
     batch = (existing.data as TrackingBatch | null) ?? null;
+    if (!batch) {
+      console.warn(
+        '[tracking-numbers] POST: requested batch not found for user; creating a new one',
+        JSON.stringify(logContext)
+      );
+    }
   }
 
   if (!batch) {
@@ -222,16 +289,25 @@ async function handlePost(request: Request) {
       .insert({ user_id: user.id, label: label ?? 'Order Hub upload', tracking_count: 0 })
       .select(BATCH_COLS)
       .single();
-    if (created.error) return dbErrorResponse(created.error);
+    if (created.error) {
+      logFailure('POST batch insert', logContext, created.error);
+      return dbErrorResponse(created.error);
+    }
     batch = created.data as TrackingBatch;
     createdBatch = true;
   }
   const batchId = batch.id;
 
   // If saving the numbers fails, don't leave an empty batch behind on the Tracking page.
-  const failWith = async (error: NonNullable<DbError>) => {
+  const failWith = async (step: string, error: NonNullable<DbError>) => {
+    logFailure(step, { ...logContext, batchId, createdBatch }, error);
     if (createdBatch) {
-      await supabase.from('tracking_batches').delete().eq('id', batchId).eq('user_id', user.id);
+      const removed = await supabase
+        .from('tracking_batches')
+        .delete()
+        .eq('id', batchId)
+        .eq('user_id', user.id);
+      if (removed.error) logFailure('POST empty-batch cleanup', { ...logContext, batchId }, removed.error);
     }
     return dbErrorResponse(error);
   };
@@ -248,17 +324,21 @@ async function handlePost(request: Request) {
     .select(NUMBER_COLS);
 
   if (upserted.error && !isMissingConflictTargetError(upserted.error.message, upserted.error.code)) {
-    return failWith(upserted.error);
+    return failWith('POST numbers upsert', upserted.error);
   }
 
   if (upserted.error) {
     // The database has no unique (user_id, tracking_number) constraint (table predates schema.sql
     // or the constraint was dropped), so ON CONFLICT cannot be used. Insert the new numbers and
     // update the existing ones by id instead — nothing is rejected as a duplicate.
+    console.warn(
+      '[tracking-numbers] POST: no unique (user_id, tracking_number) constraint; using insert+update fallback',
+      JSON.stringify({ ...logContext, batchId })
+    );
     if (newRows.length > 0) {
       for (const part of chunk(newRows)) {
         const inserted = await supabase.from('tracking_numbers').insert(part);
-        if (inserted.error) return failWith(inserted.error);
+        if (inserted.error) return failWith('POST numbers insert (fallback)', inserted.error);
       }
     }
     for (const r of existingRows) {
@@ -268,17 +348,37 @@ async function handlePost(request: Request) {
         .update({ batch_id: batchId, recipient_name: r.recipient_name })
         .eq('id', id)
         .eq('user_id', user.id);
-      if (updated.error) return failWith(updated.error);
+      if (updated.error) return failWith('POST numbers update (fallback)', updated.error);
     }
   }
 
-  // Keep the denormalised count in sync (a session may upload more than one file).
+  // Read back what is actually attached to the batch. This is the number the Tracking page will
+  // show, so it doubles as end-to-end verification that the write really landed (RLS can make an
+  // insert "succeed" with zero visible rows, and that must not be reported as a save).
   const counted = await supabase
     .from('tracking_numbers')
     .select('id', { count: 'exact', head: true })
     .eq('user_id', user.id)
     .eq('batch_id', batchId);
-  const trackingCount = counted.error ? payload.length : counted.count ?? payload.length;
+  if (counted.error) {
+    logFailure('POST verification count', { ...logContext, batchId }, counted.error);
+  }
+  const verifiedCount = counted.error ? null : counted.count ?? null;
+  if (verifiedCount === 0) {
+    // Don't delete the batch here: the rows may exist but be hidden by a missing SELECT policy,
+    // and an empty batch on the Tracking page is a useful breadcrumb for that case.
+    const error = {
+      message:
+        'The database accepted the tracking numbers but reports none attached to this upload ' +
+        '(0 rows visible for your account). This usually means the tracking_numbers table has a ' +
+        'row-level security policy that hides or rejects your rows. Re-run supabase/schema.sql ' +
+        'in the Supabase SQL Editor, then retry.',
+      code: 'verification_failed',
+    };
+    logFailure('POST verification', { ...logContext, batchId, createdBatch }, error);
+    return dbErrorResponse(error);
+  }
+  const trackingCount = verifiedCount ?? payload.length;
 
   const updatedBatch = await supabase
     .from('tracking_batches')
@@ -290,19 +390,35 @@ async function handlePost(request: Request) {
   if (!updatedBatch.error && updatedBatch.data) {
     batch = updatedBatch.data as TrackingBatch;
   } else {
+    if (updatedBatch.error) {
+      logFailure('POST batch count update (non-fatal)', { ...logContext, batchId }, updatedBatch.error);
+    }
     batch = { ...batch, tracking_count: trackingCount };
   }
 
   let savedRows: TrackingNumberRow[] = (upserted.data ?? []) as TrackingNumberRow[];
-  if (upserted.error) {
+  if (upserted.error || savedRows.length === 0) {
     const reread = await supabase
       .from('tracking_numbers')
       .select(NUMBER_COLS)
       .eq('user_id', user.id)
       .eq('batch_id', batchId)
       .in('tracking_number', allTns.slice(0, CHUNK));
+    if (reread.error) logFailure('POST reread (non-fatal)', { ...logContext, batchId }, reread.error);
     savedRows = (reread.data ?? []) as TrackingNumberRow[];
   }
+
+  console.info(
+    '[tracking-numbers] POST saved',
+    JSON.stringify({
+      ...logContext,
+      batchId,
+      createdBatch,
+      saved: newRows.length,
+      moved: existingRows.length,
+      verifiedCount,
+    })
+  );
 
   return NextResponse.json({
     rows: savedRows,
@@ -312,6 +428,8 @@ async function handlePost(request: Request) {
     saved: newRows.length,
     /** Numbers already saved earlier; they were moved into this batch rather than rejected. */
     moved: existingRows.length,
+    /** Rows the database reports attached to this batch after the write (null if the count failed). */
+    verified_count: verifiedCount,
     batch,
     batch_id: batchId,
   });
@@ -325,17 +443,18 @@ export async function DELETE(request: Request) {
   try {
     return await handleDelete(request);
   } catch (err) {
-    return unexpectedErrorResponse(err);
+    return unexpectedErrorResponse('DELETE', err);
   }
 }
 
 async function handleDelete(request: Request) {
   const supabase = await createClient();
-  const { user, response } = await requireUser(supabase);
+  const { user, response } = await requireUser(supabase, 'DELETE');
   if (!user) return response!;
 
   const batchId = new URL(request.url).searchParams.get('batch_id')?.trim();
   if (!batchId) return NextResponse.json({ error: 'batch_id required' }, { status: 400 });
+  const logContext = { userId: user.id, batchId };
 
   if (batchId === LEGACY_BATCH_ID) {
     const { error } = await supabase
@@ -343,7 +462,10 @@ async function handleDelete(request: Request) {
       .delete()
       .eq('user_id', user.id)
       .is('batch_id', null);
-    if (error) return dbErrorResponse(error);
+    if (error) {
+      logFailure('DELETE legacy numbers', logContext, error);
+      return dbErrorResponse(error);
+    }
     return NextResponse.json({ ok: true, batch_id: batchId });
   }
 
@@ -354,13 +476,19 @@ async function handleDelete(request: Request) {
     .delete()
     .eq('user_id', user.id)
     .eq('batch_id', batchId);
-  if (numbers.error) return dbErrorResponse(numbers.error);
+  if (numbers.error) {
+    logFailure('DELETE batch numbers', logContext, numbers.error);
+    return dbErrorResponse(numbers.error);
+  }
 
   const { error } = await supabase
     .from('tracking_batches')
     .delete()
     .eq('id', batchId)
     .eq('user_id', user.id);
-  if (error) return dbErrorResponse(error);
+  if (error) {
+    logFailure('DELETE batch', logContext, error);
+    return dbErrorResponse(error);
+  }
   return NextResponse.json({ ok: true, batch_id: batchId });
 }

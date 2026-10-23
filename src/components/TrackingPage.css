@@ -130,6 +130,21 @@
   cursor: not-allowed;
 }
 
+.tracking-reload-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--sc-border);
+  background: var(--sc-surface);
+  color: var(--sc-text);
+}
+
+.tracking-reload-btn:hover {
+  border-color: var(--sc-accent);
+}
+
 .tracking-popup-note {
   margin: 0.5rem 0 0;
   color: var(--sc-muted);

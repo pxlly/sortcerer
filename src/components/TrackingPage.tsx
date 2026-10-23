@@ -7,7 +7,7 @@ import {
   buildUspsBulkTrackingUrl,
   chunkTrackingNumbers,
 } from '@/lib/uspsBulkTracking';
-import type { TrackingBatchGroup } from '@/lib/trackingBatches';
+import type { TrackingBatchGroup, TrackingMeta } from '@/lib/trackingBatches';
 import './TrackingPage.css';
 
 function formatWhen(iso: string | undefined): string {
@@ -38,24 +38,62 @@ function openAll(urls: string[]): number {
   return opened;
 }
 
-async function fetchBatches(): Promise<{ batches: TrackingBatchGroup[]; error: string | null }> {
+type FetchResult = {
+  batches: TrackingBatchGroup[];
+  meta: TrackingMeta | null;
+  error: string | null;
+};
+
+async function fetchBatches(): Promise<FetchResult> {
   try {
-    const res = await fetch('/api/tracking-numbers', { headers: { Accept: 'application/json' } });
+    const res = await fetch('/api/tracking-numbers', {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
     const isJson = (res.headers.get('content-type') || '').includes('application/json');
     if (res.redirected || !isJson) {
       return {
         batches: [],
+        meta: null,
         error: 'Your session has expired or the server returned an unexpected page. Sign in again and reload.',
       };
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { batches: [], error: data.error || 'Failed to load tracking numbers' };
+      const code = typeof data.code === 'string' && data.code ? ` (code ${data.code})` : '';
+      return {
+        batches: [],
+        meta: null,
+        error: `${data.error || 'Failed to load tracking numbers'}${code}`,
+      };
     }
-    return { batches: Array.isArray(data.batches) ? data.batches : [], error: null };
+    const meta =
+      data.meta && typeof data.meta === 'object' && typeof data.meta.numberCount === 'number'
+        ? (data.meta as TrackingMeta)
+        : null;
+    return { batches: Array.isArray(data.batches) ? data.batches : [], meta, error: null };
   } catch {
-    return { batches: [], error: 'Failed to load tracking numbers' };
+    return { batches: [], meta: null, error: 'Failed to load tracking numbers' };
   }
+}
+
+/** One-line summary of what the database holds for this account, independent of the grouping. */
+function describeMeta(meta: TrackingMeta): string {
+  const parts = [
+    `${meta.numberCount} tracking number${meta.numberCount === 1 ? '' : 's'}`,
+    `${meta.batchCount} session${meta.batchCount === 1 ? '' : 's'}`,
+  ];
+  if (meta.unbatchedCount > 0) {
+    parts.push(
+      `${meta.unbatchedCount} saved without a session${
+        meta.orphanedCount > 0 ? ` (${meta.orphanedCount} whose session was deleted)` : ''
+      }`
+    );
+  }
+  if (meta.emptyBatchCount > 0) {
+    parts.push(`${meta.emptyBatchCount} empty session${meta.emptyBatchCount === 1 ? '' : 's'}`);
+  }
+  return `Database for this account: ${parts.join(' · ')}.`;
 }
 
 function batchTitle(batch: TrackingBatchGroup): string {
@@ -297,9 +335,11 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
 
 export default function TrackingPage() {
   const [batches, setBatches] = useState<TrackingBatchGroup[]>([]);
+  const [meta, setMeta] = useState<TrackingMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<TrackingBatchGroup | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -307,12 +347,13 @@ export default function TrackingPage() {
       if (cancelled) return;
       setError(result.error);
       setBatches(result.batches);
+      setMeta(result.meta);
       setLoading(false);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
 
   const deleteBatch = useCallback(async (batch: TrackingBatchGroup): Promise<string | null> => {
     try {
@@ -352,8 +393,30 @@ export default function TrackingPage() {
 
       {!loading && !error && batches.length === 0 && (
         <div className="tracking-page-empty">
-          No tracking numbers yet. Generate a CSV in Order Hub, then upload the tracking .txt file.
+          No tracking numbers yet. Upload a tracking txt/csv in Order Hub Step 3 (or Step 2 in
+          file-order mode); every upload is saved here immediately.
+          {meta && (
+            <>
+              <br />
+              <small>{describeMeta(meta)}</small>
+            </>
+          )}
         </div>
+      )}
+
+      {!loading && (
+        <p className="tracking-page-meta">
+          <button
+            type="button"
+            className="tracking-reload-btn"
+            onClick={() => {
+              setLoading(true);
+              setReloadKey((k) => k + 1);
+            }}
+          >
+            Reload list
+          </button>
+        </p>
       )}
 
       {!loading && batches.length > 0 && (
@@ -361,6 +424,12 @@ export default function TrackingPage() {
           <p className="tracking-page-meta">
             {batches.length} session{batches.length === 1 ? '' : 's'} · {totalNumbers} tracking
             number{totalNumbers === 1 ? '' : 's'}
+            {meta && (meta.unbatchedCount > 0 || meta.emptyBatchCount > 0) && (
+              <>
+                <br />
+                <small>{describeMeta(meta)}</small>
+              </>
+            )}
           </p>
           <div className="tracking-page-list">
             {batches.map((batch) => (

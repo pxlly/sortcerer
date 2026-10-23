@@ -181,7 +181,12 @@ create table if not exists public.tracking_numbers (
   unique (user_id, tracking_number)
 );
 
--- Bring pre-existing tracking_numbers tables up to date (idempotent; no-ops on fresh installs)
+-- Bring pre-existing tracking_numbers tables up to date (idempotent; no-ops on fresh installs).
+-- Live projects have been seen with a hand-made tracking_numbers table (id, user_id,
+-- tracking_number, recipient_name, batch_id, created_at only), so every column the API touches
+-- is added here if missing.
+alter table public.tracking_numbers
+  add column if not exists recipient_name text;
 alter table public.tracking_numbers
   add column if not exists batch_id uuid references public.tracking_batches (id) on delete cascade;
 alter table public.tracking_numbers

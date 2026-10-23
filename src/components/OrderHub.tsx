@@ -32,6 +32,58 @@ import './OrderHub.css';
 const BULK_CONFIRM_BASE = 'https://sellercentral.amazon.com/orders-v3/bulk-confirm-shipment';
 const BULK_CONFIRM_CHUNK_SIZE = 50;
 
+/**
+ * After a tracking save, re-read GET /api/tracking-numbers (the exact query the Tracking page
+ * runs) and confirm the session is listed. Returns the visible count on success, or the reason
+ * the check could not be satisfied so the user can report something concrete.
+ */
+async function verifyTrackingBatchVisible(
+  batchId: string | null
+): Promise<{ ok: true; count: number } | { ok: false; reason: string }> {
+  if (!batchId) return { ok: false, reason: 'The server did not return a session id.' };
+  try {
+    const res = await fetch('/api/tracking-numbers', {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    if (!isJson) return { ok: false, reason: `Tracking list returned HTTP ${res.status} (not JSON).` };
+    const data: {
+      error?: string;
+      code?: string;
+      batches?: { id?: string; rows?: unknown[] }[];
+      meta?: { numberCount?: number; batchCount?: number };
+    } = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        reason: `Tracking list returned HTTP ${res.status}: ${data.error || 'unknown error'}${
+          data.code ? ` [${data.code}]` : ''
+        }.`,
+      };
+    }
+    const batch = (data.batches ?? []).find((b) => b.id === batchId);
+    if (!batch) {
+      const meta = data.meta;
+      const counts =
+        meta && typeof meta.numberCount === 'number'
+          ? ` The list has ${meta.batchCount ?? 0} session(s) and ${meta.numberCount} number(s) for this account.`
+          : '';
+      return { ok: false, reason: `Session ${batchId.slice(0, 8)} is not in the list.${counts}` };
+    }
+    const count = Array.isArray(batch.rows) ? batch.rows.length : 0;
+    if (count === 0) {
+      return { ok: false, reason: 'The session is listed but contains 0 tracking numbers.' };
+    }
+    return { ok: true, count };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Could not re-read the Tracking list (${err instanceof Error ? err.message : String(err)}).`,
+    };
+  }
+}
+
 /** Smaller than WeShop (20/23) so long product titles fit on label header pages. */
 const HEADER_FONT_SIZE = 13;
 const HEADER_MARGIN = 28;
@@ -813,7 +865,8 @@ export default function OrderHub() {
           );
         }
         if (!res.ok) {
-          return fail(data.error || `HTTP ${res.status} ${res.statusText}`.trim());
+          const code = data.code ? ` [${data.code}]` : '';
+          return fail(`${data.error || `HTTP ${res.status} ${res.statusText}`.trim()}${code}`);
         }
         const savedBatchId: unknown = data.batch?.id ?? data.batch_id;
         if (typeof savedBatchId === 'string' && savedBatchId) {
@@ -827,8 +880,26 @@ export default function OrderHub() {
             ? ` (${saved} new, ${moved} already saved earlier and moved into this session)`
             : '';
         setPendingTrackingSave(null);
-        setTrackingSaveStatus(`${prefix}Saved ${total} tracking number(s) to Tracking${detail}.`);
-        showToast(`${prefix}Saved ${total} tracking number(s) to Tracking.`);
+
+        // Prove the save is visible where the user will look for it: re-read the Tracking list
+        // and confirm this session is in it. "Saved" alone has been wrong before.
+        const verification = await verifyTrackingBatchVisible(
+          typeof savedBatchId === 'string' ? savedBatchId : null
+        );
+        const shortId =
+          typeof savedBatchId === 'string' && savedBatchId ? savedBatchId.slice(0, 8) : '?';
+        if (verification.ok) {
+          setTrackingSaveStatus(
+            `${prefix}Saved ${total} tracking number(s) to Tracking${detail}. Verified: the Tracking page now lists this session with ${verification.count} number(s) (session ${shortId}).`
+          );
+          showToast(`${prefix}Saved ${total} tracking number(s) to Tracking.`);
+        } else {
+          setTrackingTxtError(
+            `${prefix}The server reported ${total} tracking number(s) saved (session ${shortId}), but the Tracking page list does not show that session: ${verification.reason} Open Tracking and press "Reload list"; if it is still missing, send this message to support.`
+          );
+          setTrackingSaveStatus(null);
+          showToast(`${prefix}Saved, but Tracking does not list the session yet.`);
+        }
         setTrackingSaving(false);
         return true;
       } catch (err) {
@@ -843,48 +914,59 @@ export default function OrderHub() {
     [showToast]
   );
 
+  /**
+   * Step 3: parse the tracking file and ALWAYS save the numbers to Tracking. The recipient-name
+   * mapping CSV is a bonus that needs the Step 1 rows from this browser session; when they are
+   * missing (page reloaded, came back later) or the counts differ, the CSV is skipped with a
+   * clear note — the numbers are still saved, never silently dropped.
+   */
   const handleTrackingTxt = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     setTrackingTxtError(null);
     setTrackingSaveStatus(null);
-    if (!file || !csvRows?.length) {
-      setTrackingTxtError(
-        'Generate and download CSV first, then upload the tracking numbers txt/csv file.'
-      );
-      return;
-    }
+    if (!file) return;
     const reader = new FileReader();
     reader.onload = async () => {
       const text = String(reader.result);
       const parsed = parseTrackingFile(text, file.name);
       const trackingNumbers = parsed.entries.map((e) => e.trackingNumber);
       if (!trackingNumbers.length) {
-        setTrackingTxtError('No tracking numbers found in the uploaded txt/csv file.');
-        return;
-      }
-      if (trackingNumbers.length !== csvRows.length) {
-        const dupNote = parsed.duplicatesRemoved
-          ? ` (${parsed.duplicatesRemoved} duplicate(s) were ignored.)`
-          : '';
         setTrackingTxtError(
-          `Tracking file has ${trackingNumbers.length} tracking number(s) but CSV has ${csvRows.length} row(s). They must match (one tracking per CSV row, same order).${dupNote}`
+          `No tracking numbers found in "${file.name}". Expected one tracking number per line, "Name : tracking" lines, or a CSV with a tracking column.`
         );
         return;
       }
-      // Names supplied inside the file (CSV column or "Name : tracking") beat positional matching.
-      const recipientNames = trackingNumbers.map(
-        (_, i) => (parsed.entries[i].recipientName || csvRows[i]?.toName || '').trim()
+      const dupNote = parsed.duplicatesRemoved
+        ? ` ${parsed.duplicatesRemoved} duplicate(s) in the file were ignored.`
+        : '';
+
+      const haveCsvRows = !!csvRows?.length;
+      const countsMatch = haveCsvRows && trackingNumbers.length === csvRows!.length;
+
+      // Names supplied inside the file (CSV column or "Name : tracking") beat positional matching,
+      // which is only trustworthy when the file lines up 1:1 with this session's CSV rows.
+      const recipientNames = trackingNumbers.map((_, i) =>
+        (parsed.entries[i].recipientName || (countsMatch ? csvRows![i]?.toName : '') || '').trim()
       );
-      const rowsWithNames = csvRows.map((row, i) => ({ ...row, toName: recipientNames[i] }));
-      const csv = buildTrackingNumbersCsv(rowsWithNames, trackingNumbers);
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `sortcerer-tracking-${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+
+      let prefix: string;
+      if (countsMatch) {
+        const rowsWithNames = csvRows!.map((row, i) => ({ ...row, toName: recipientNames[i] }));
+        const csv = buildTrackingNumbersCsv(rowsWithNames, trackingNumbers);
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `sortcerer-tracking-${new Date().toISOString().slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+        prefix = `Tracking CSV downloaded.${dupNote} `;
+      } else if (haveCsvRows) {
+        prefix = `Tracking file has ${trackingNumbers.length} tracking number(s) but this session's CSV has ${csvRows!.length} row(s), so the name-mapping CSV was NOT generated (upload a file with one tracking number per CSV row, same order, to get it).${dupNote} `;
+      } else {
+        prefix = `Step 1 was not run in this browser session, so the name-mapping CSV was skipped (names come from the file only).${dupNote} `;
+      }
 
       const persistRows = trackingNumbers.map((tn, i) => ({
         tracking_number: tn,
@@ -892,8 +974,8 @@ export default function OrderHub() {
       }));
       const batchLabel = convertSummary
         ? `${convertSummary.orders} order(s) · ${convertSummary.boxes} label(s)`
-        : `${csvRows.length} label(s)`;
-      await saveTrackingRows(persistRows, batchLabel, 'Tracking CSV downloaded. ');
+        : `${trackingNumbers.length} label(s) · ${file.name}`.slice(0, 200);
+      await saveTrackingRows(persistRows, batchLabel, prefix);
     };
     reader.onerror = () => {
       setTrackingTxtError('Could not read the uploaded file. Please try again.');
@@ -1198,30 +1280,39 @@ export default function OrderHub() {
           <a href="/tracking" style={{ color: 'var(--sc-accent)' }}>
             Tracking
           </a>
+          {!csvRows?.length && (
+            <>
+              {' '}
+              <em>
+                (Step 1 has not been run in this session, so the recipient-name CSV will be skipped
+                — the numbers are still saved.)
+              </em>
+            </>
+          )}
         </p>
         <input
           ref={trackingTxtRef}
           type="file"
           accept=".txt,.csv,text/plain,text/csv"
           onChange={handleTrackingTxt}
-          disabled={!csvRows?.length}
+          disabled={trackingSaving}
           style={{ display: 'none' }}
         />
         <div
           className="order-hub-upload-area"
-          onClick={() => csvRows?.length && trackingTxtRef.current?.click()}
+          onClick={() => !trackingSaving && trackingTxtRef.current?.click()}
           onKeyDown={(e) => {
-            if (csvRows?.length && e.key === 'Enter') trackingTxtRef.current?.click();
+            if (!trackingSaving && e.key === 'Enter') trackingTxtRef.current?.click();
           }}
           role="button"
-          tabIndex={csvRows?.length ? 0 : -1}
-          aria-disabled={!csvRows?.length}
+          tabIndex={trackingSaving ? -1 : 0}
+          aria-disabled={trackingSaving}
           style={{
-            opacity: csvRows?.length ? 1 : 0.6,
-            cursor: csvRows?.length ? 'pointer' : 'not-allowed',
+            opacity: trackingSaving ? 0.6 : 1,
+            cursor: trackingSaving ? 'progress' : 'pointer',
           }}
         >
-          Upload tracking txt/csv
+          {trackingSaving ? 'Saving…' : 'Upload tracking txt/csv'}
         </div>
         {trackingTxtError && (
           <div className="order-hub-error" role="alert">
