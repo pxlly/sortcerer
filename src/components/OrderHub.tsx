@@ -51,7 +51,7 @@ async function verifyTrackingBatchVisible(
     const data: {
       error?: string;
       code?: string;
-      batches?: { id?: string; rows?: unknown[] }[];
+      batches?: { id?: string; tracking_count?: number; rows?: unknown[] }[];
       meta?: { numberCount?: number; batchCount?: number };
     } = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -71,7 +71,12 @@ async function verifyTrackingBatchVisible(
           : '';
       return { ok: false, reason: `Session ${batchId.slice(0, 8)} is not in the list.${counts}` };
     }
-    const count = Array.isArray(batch.rows) ? batch.rows.length : 0;
+    const count =
+      typeof batch.tracking_count === 'number'
+        ? batch.tracking_count
+        : Array.isArray(batch.rows)
+          ? batch.rows.length
+          : 0;
     if (count === 0) {
       return { ok: false, reason: 'The session is listed but contains 0 tracking numbers.' };
     }

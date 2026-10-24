@@ -5,6 +5,7 @@ import {
   isDbUnreachableError,
   isMissingConflictTargetError,
 } from '@/lib/supabase/dbErrors';
+import { fetchAllRows } from '@/lib/supabase/pageAll';
 import {
   LEGACY_BATCH_ID,
   type TrackingBatch,
@@ -86,92 +87,204 @@ function chunk<T>(items: T[], size = CHUNK): T[][] {
 }
 
 /**
- * Returns every batch (newest first) with its numbers, plus an "Earlier uploads" group for legacy
- * rows, and `meta` with raw per-table counts so the Tracking page can prove whether anything is
- * stored for this account even when the grouped list comes back empty.
+ * GET /api/tracking-numbers
+ *   Lists every batch (newest first) with an exact server-side count, plus an "Earlier uploads"
+ *   group for numbers without a (live) batch, and `meta` with per-account totals. Numbers are NOT
+ *   included: PostgREST caps any single SELECT at 1000 rows, and fetching "all numbers for the
+ *   user" used to truncate silently, making the newest sessions look empty.
+ * GET /api/tracking-numbers?batch_id=<uuid|legacy>
+ *   Returns that batch's numbers, paged in 1000-row steps so nothing is dropped.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    return await handleGet();
+    const batchId = new URL(request.url).searchParams.get('batch_id')?.trim();
+    return batchId ? await handleGetBatchRows(batchId) : await handleGetList();
   } catch (err) {
     return unexpectedErrorResponse('GET', err);
   }
 }
 
-async function handleGet() {
+type Supabase = Awaited<ReturnType<typeof createClient>>;
+
+/**
+ * Exact row count without transferring rows (immune to the 1000-row cap).
+ * `batchId`: undefined = all of the user's numbers, null = numbers with no batch, uuid = one batch.
+ */
+async function countNumbers(
+  supabase: Supabase,
+  userId: string,
+  batchId?: string | null
+): Promise<{ count: number; error: NonNullable<DbError> | null }> {
+  let q = supabase
+    .from('tracking_numbers')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId);
+  if (batchId === null) q = q.is('batch_id', null);
+  else if (batchId !== undefined) q = q.eq('batch_id', batchId);
+  const { count, error } = await q;
+  if (error) return { count: 0, error };
+  return { count: count ?? 0, error: null };
+}
+
+async function listBatches(supabase: Supabase, userId: string) {
+  return fetchAllRows<TrackingBatch>((from, to) =>
+    supabase
+      .from('tracking_batches')
+      .select(BATCH_COLS)
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
+}
+
+async function handleGetList() {
   const supabase = await createClient();
   const { user, response } = await requireUser(supabase, 'GET');
   if (!user) return response!;
 
-  const [batchesRes, rowsRes] = await Promise.all([
-    supabase
-      .from('tracking_batches')
-      .select(BATCH_COLS)
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false }),
-    supabase
-      .from('tracking_numbers')
-      .select(NUMBER_COLS)
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: true })
-      .order('tracking_number', { ascending: true }),
-  ]);
-
+  const batchesRes = await listBatches(supabase, user.id);
   if (batchesRes.error) {
     logFailure('GET batches select', { userId: user.id }, batchesRes.error);
     return dbErrorResponse(batchesRes.error);
   }
-  if (rowsRes.error) {
-    logFailure('GET numbers select', { userId: user.id }, rowsRes.error);
-    return dbErrorResponse(rowsRes.error);
-  }
+  const batchRows = batchesRes.data;
 
-  const groups = new Map<string, TrackingBatchGroup>();
-  for (const b of (batchesRes.data ?? []) as TrackingBatch[]) {
-    groups.set(b.id, { ...b, rows: [] });
-  }
+  // One cheap HEAD count per batch (a few dozen at most) instead of one giant, capped SELECT.
+  const [perBatch, total, unbatched, newestUnbatched] = await Promise.all([
+    Promise.all(batchRows.map((b) => countNumbers(supabase, user.id, b.id))),
+    countNumbers(supabase, user.id),
+    countNumbers(supabase, user.id, null),
+    supabase
+      .from('tracking_numbers')
+      .select('created_at')
+      .eq('user_id', user.id)
+      .is('batch_id', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
 
-  const legacyRows: TrackingNumberRow[] = [];
-  let orphanedRows = 0;
-  for (const row of (rowsRes.data ?? []) as TrackingNumberRow[]) {
-    const group = row.batch_id ? groups.get(row.batch_id) : undefined;
-    if (group) group.rows.push(row);
-    else {
-      if (row.batch_id) orphanedRows += 1;
-      legacyRows.push(row);
+  for (const c of [total, unbatched, ...perBatch]) {
+    if (c.error) {
+      logFailure('GET numbers count', { userId: user.id }, c.error);
+      return dbErrorResponse(c.error);
     }
   }
 
+  let batchedTotal = 0;
+  const batches: TrackingBatchGroup[] = [];
+  const heals: PromiseLike<unknown>[] = [];
+  batchRows.forEach((b, i) => {
+    const count = perBatch[i].count;
+    batchedTotal += count;
+    if (count !== b.tracking_count) {
+      // Self-heal the denormalised count (older rows were written before it was kept in sync).
+      heals.push(
+        supabase
+          .from('tracking_batches')
+          .update({ tracking_count: count })
+          .eq('id', b.id)
+          .eq('user_id', user.id)
+          .then(({ error }) => {
+            if (error) logFailure('GET tracking_count heal (non-fatal)', { userId: user.id, batchId: b.id }, error);
+          })
+      );
+    }
+    batches.push({ ...b, tracking_count: count });
+  });
+  await Promise.all(heals);
+
+  // Numbers whose batch_id points at a batch that no longer exists (deleted before the cascade
+  // FK existed). They are reachable together with the batch_id-null rows under "Earlier uploads".
+  const orphanedCount = Math.max(0, total.count - unbatched.count - batchedTotal);
+  const legacyCount = unbatched.count + orphanedCount;
+
   const meta: TrackingMeta = {
-    numberCount: rowsRes.data?.length ?? 0,
-    batchCount: batchesRes.data?.length ?? 0,
-    unbatchedCount: legacyRows.length,
-    orphanedCount: orphanedRows,
-    emptyBatchCount: [...groups.values()].filter((g) => g.rows.length === 0).length,
+    numberCount: total.count,
+    batchCount: batchRows.length,
+    unbatchedCount: legacyCount,
+    orphanedCount,
+    emptyBatchCount: batches.filter((b) => b.tracking_count === 0).length,
   };
 
-  const batches: TrackingBatchGroup[] = [...groups.values()].map((g) => ({
-    ...g,
-    tracking_count: g.rows.length || g.tracking_count,
-  }));
-
-  if (legacyRows.length > 0) {
-    // Numbers saved before batches existed (or whose batch was orphaned) stay reachable in one group.
-    const newest = legacyRows.reduce<string>(
-      (max, r) => (r.created_at && r.created_at > max ? r.created_at : max),
-      legacyRows[0]?.created_at ?? new Date(0).toISOString()
-    );
+  if (legacyCount > 0) {
     batches.push({
       id: LEGACY_BATCH_ID,
       legacy: true,
       label: 'Earlier uploads',
-      tracking_count: legacyRows.length,
-      created_at: newest,
-      rows: legacyRows,
+      tracking_count: legacyCount,
+      created_at:
+        (newestUnbatched.data as { created_at?: string } | null)?.created_at ??
+        new Date(0).toISOString(),
     });
   }
 
   return NextResponse.json({ batches, meta });
+}
+
+/** All numbers of one batch (or of the legacy group), paged so no row is lost. */
+async function handleGetBatchRows(batchId: string) {
+  const supabase = await createClient();
+  const { user, response } = await requireUser(supabase, 'GET rows');
+  if (!user) return response!;
+
+  type RowFilter =
+    | { kind: 'batch'; batchId: string }
+    | { kind: 'no-batch' }
+    | { kind: 'orphaned'; liveBatchIds: string[] };
+
+  const pageRows = (filter: RowFilter) =>
+    fetchAllRows<TrackingNumberRow>((from, to) => {
+      let q = supabase.from('tracking_numbers').select(NUMBER_COLS).eq('user_id', user.id);
+      if (filter.kind === 'batch') q = q.eq('batch_id', filter.batchId);
+      else if (filter.kind === 'no-batch') q = q.is('batch_id', null);
+      else {
+        q = q.not('batch_id', 'is', null);
+        if (filter.liveBatchIds.length > 0) {
+          q = q.not('batch_id', 'in', `(${filter.liveBatchIds.join(',')})`);
+        }
+      }
+      return q
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to) as unknown as PromiseLike<{
+        data: TrackingNumberRow[] | null;
+        error: { message: string; code?: string | null } | null;
+      }>;
+    });
+
+  if (batchId !== LEGACY_BATCH_ID) {
+    const rows = await pageRows({ kind: 'batch', batchId });
+    if (rows.error) {
+      logFailure('GET batch rows', { userId: user.id, batchId }, rows.error);
+      return dbErrorResponse(rows.error);
+    }
+    return NextResponse.json({ batch_id: batchId, rows: rows.data });
+  }
+
+  const batchesRes = await listBatches(supabase, user.id);
+  if (batchesRes.error) {
+    logFailure('GET legacy rows (batches)', { userId: user.id }, batchesRes.error);
+    return dbErrorResponse(batchesRes.error);
+  }
+  const liveIds = batchesRes.data.map((b) => b.id);
+  const [nullRows, orphanRows] = await Promise.all([
+    pageRows({ kind: 'no-batch' }),
+    pageRows({ kind: 'orphaned', liveBatchIds: liveIds }),
+  ]);
+  if (nullRows.error) {
+    logFailure('GET legacy rows (null batch)', { userId: user.id }, nullRows.error);
+    return dbErrorResponse(nullRows.error);
+  }
+  if (orphanRows.error) {
+    logFailure('GET legacy rows (orphaned)', { userId: user.id }, orphanRows.error);
+    return dbErrorResponse(orphanRows.error);
+  }
+  const rows = [...nullRows.data, ...orphanRows.data].sort((a, b) =>
+    (a.created_at ?? '').localeCompare(b.created_at ?? '') || (a.id ?? '').localeCompare(b.id ?? '')
+  );
+  return NextResponse.json({ batch_id: LEGACY_BATCH_ID, rows });
 }
 
 /**

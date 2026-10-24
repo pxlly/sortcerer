@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { formatDbError } from '@/lib/supabase/dbErrors';
+import { fetchAllRows } from '@/lib/supabase/pageAll';
 import { capMaxQtyByWeight } from '@/lib/packing';
 import { normalizeAsin } from '@/lib/masterRefKeys';
 
@@ -69,14 +70,20 @@ async function upsertBySku(
   | { rows: MasterRefRow[]; inserted: number; updated: number; error?: never }
   | { rows?: never; inserted?: never; updated?: never; error: string }
 > {
-  const existing = await supabase
-    .from('master_reference')
-    .select(SELECT_COLS)
-    .eq('user_id', userId)
-    .in(
-      'sku',
-      payload.map((r) => r.sku)
-    );
+  // Paged: a large catalog import can look up more than PostgREST's 1000-row cap, and a
+  // truncated "existing" set would turn updates into duplicate inserts.
+  const existing = await fetchAllRows<MasterRefRow>((from, to) =>
+    supabase
+      .from('master_reference')
+      .select(SELECT_COLS)
+      .eq('user_id', userId)
+      .in(
+        'sku',
+        payload.map((r) => r.sku)
+      )
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
   if (existing.error) return { error: existing.error.message };
 
   const existingBySku = new Map<string, MasterRefRow>(
@@ -134,11 +141,16 @@ export async function GET() {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { data, error } = await supabase
-    .from('master_reference')
-    .select('id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at')
-    .eq('user_id', user.id)
-    .order('sku', { ascending: true });
+  // Paged: PostgREST caps a single SELECT at 1000 rows, and a catalog can grow past that.
+  const { data, error } = await fetchAllRows<MasterRefRow>((from, to) =>
+    supabase
+      .from('master_reference')
+      .select('id, asin, sku, weight_lb, max_qty_per_box, product_name, updated_at')
+      .eq('user_id', user.id)
+      .order('sku', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
 
   if (error) return NextResponse.json({ error: formatDbError(error.message) }, { status: 500 });
   return NextResponse.json({ rows: data ?? [] });

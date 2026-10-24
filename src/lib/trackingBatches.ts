@@ -15,11 +15,15 @@ export type TrackingBatch = {
   created_at: string;
 };
 
-/** A batch with its tracking numbers, as served by GET /api/tracking-numbers. */
+/**
+ * A batch as served by GET /api/tracking-numbers. `tracking_count` is an exact server-side count.
+ * `rows` is only present once loaded from GET /api/tracking-numbers?batch_id=<id> (numbers are
+ * fetched per batch, paged, because PostgREST caps a single SELECT at 1000 rows).
+ */
 export type TrackingBatchGroup = TrackingBatch & {
   /** `true` for the synthetic group of rows saved before batches existed. */
   legacy?: boolean;
-  rows: TrackingNumberRow[];
+  rows?: TrackingNumberRow[];
 };
 
 /**

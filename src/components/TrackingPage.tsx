@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useCallback, useEffect, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   USPS_BULK_CHUNK_SIZE,
   buildUspsBulkTrackingUrl,
   chunkTrackingNumbers,
 } from '@/lib/uspsBulkTracking';
-import type { TrackingBatchGroup, TrackingMeta } from '@/lib/trackingBatches';
+import type { TrackingBatchGroup, TrackingMeta, TrackingNumberRow } from '@/lib/trackingBatches';
 import './TrackingPage.css';
 
 function formatWhen(iso: string | undefined): string {
@@ -77,6 +77,30 @@ async function fetchBatches(): Promise<FetchResult> {
   }
 }
 
+/** Numbers of one session (or the legacy group), paged server-side so none are dropped. */
+async function fetchBatchRows(
+  batchId: string
+): Promise<{ rows: TrackingNumberRow[]; error: null } | { rows: null; error: string }> {
+  try {
+    const res = await fetch(`/api/tracking-numbers?batch_id=${encodeURIComponent(batchId)}`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    if (res.redirected || !isJson) {
+      return { rows: null, error: 'Your session has expired. Sign in again and reload.' };
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const code = typeof data.code === 'string' && data.code ? ` (code ${data.code})` : '';
+      return { rows: null, error: `${data.error || 'Failed to load tracking numbers'}${code}` };
+    }
+    return { rows: Array.isArray(data.rows) ? (data.rows as TrackingNumberRow[]) : [], error: null };
+  } catch {
+    return { rows: null, error: 'Failed to load tracking numbers' };
+  }
+}
+
 /** One-line summary of what the database holds for this account, independent of the grouping. */
 function describeMeta(meta: TrackingMeta): string {
   const parts = [
@@ -124,7 +148,7 @@ function DeleteBatchModal({ batch, onCancel, onConfirm }: DeleteBatchModalProps)
   const ackDeleteId = `${uid}-ack-delete`;
   const ackIrreversibleId = `${uid}-ack-irreversible`;
 
-  const count = batch.rows.length;
+  const count = batch.tracking_count;
   const canConfirm = ackDelete && ackIrreversible && !deleting;
 
   useEffect(() => {
@@ -237,18 +261,55 @@ type BatchRowProps = {
 
 function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
   const [note, setNote] = useState<string | null>(null);
+  const [rows, setRows] = useState<TrackingNumberRow[] | null>(batch.rows ?? null);
+  const [rowsError, setRowsError] = useState<string | null>(null);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [showLinks, setShowLinks] = useState(false);
+  // One in-flight fetch at a time; Track and the details toggle may both ask for the numbers.
+  const rowsPromiseRef = useRef<Promise<TrackingNumberRow[] | null> | null>(null);
 
-  const numbers = batch.rows.map((r) => r.tracking_number);
+  const count = batch.tracking_count;
+  const expectedTabs = Math.max(1, Math.ceil(count / USPS_BULK_CHUNK_SIZE));
+
+  const loadRows = useCallback(async (): Promise<TrackingNumberRow[] | null> => {
+    if (rows) return rows;
+    if (rowsPromiseRef.current) return rowsPromiseRef.current;
+    setLoadingRows(true);
+    setRowsError(null);
+    const promise = fetchBatchRows(batch.id).then((result) => {
+      rowsPromiseRef.current = null;
+      setLoadingRows(false);
+      if (result.error) {
+        setRowsError(result.error);
+        return null;
+      }
+      setRows(result.rows);
+      return result.rows;
+    });
+    rowsPromiseRef.current = promise;
+    return promise;
+  }, [batch.id, rows]);
+
+  const numbers = (rows ?? []).map((r) => r.tracking_number);
   const chunks = chunkTrackingNumbers(numbers, USPS_BULK_CHUNK_SIZE);
   const urls = chunks.map((c) => buildUspsBulkTrackingUrl(c));
-  const count = numbers.length;
 
-  const handleTrack = () => {
-    if (urls.length === 0) return;
-    const opened = openAll(urls);
-    if (opened < urls.length) {
+  const handleTrack = async () => {
+    if (count === 0) return;
+    // Numbers are fetched on demand (paged server-side). Browsers may treat window.open after an
+    // await as a pop-up; whatever is blocked is offered as plain links right below the button.
+    const loaded = rows ?? (await loadRows());
+    if (!loaded) return;
+    const loadedUrls = chunkTrackingNumbers(
+      loaded.map((r) => r.tracking_number),
+      USPS_BULK_CHUNK_SIZE
+    ).map((c) => buildUspsBulkTrackingUrl(c));
+    if (loadedUrls.length === 0) return;
+    const opened = openAll(loadedUrls);
+    if (opened < loadedUrls.length) {
+      setShowLinks(true);
       setNote(
-        `Opened ${opened} of ${urls.length} tabs. Allow pop-ups for this site, or use the chunk links below.`
+        `Opened ${opened} of ${loadedUrls.length} tab(s) — pop-ups were blocked. Click each chunk link below (or allow pop-ups for this site and press Track again).`
       );
     } else {
       setNote(null);
@@ -256,7 +317,7 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
   };
 
   return (
-    <section className="tracking-batch">
+    <section className={`tracking-batch${count === 0 ? ' tracking-batch-empty' : ''}`}>
       <div className="tracking-batch-head">
         <div className="tracking-batch-info">
           <div className="tracking-batch-title">{batchTitle(batch)}</div>
@@ -267,8 +328,11 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
               <span>{batch.label || 'Order Hub upload'}</span>
             )}
             <span className="tracking-batch-count">
-              {count} tracking number{count === 1 ? '' : 's'} · {urls.length} USPS tab
-              {urls.length === 1 ? '' : 's'}
+              {count === 0
+                ? '0 tracking numbers (empty session)'
+                : `${count} tracking number${count === 1 ? '' : 's'} · ${expectedTabs} USPS tab${
+                    expectedTabs === 1 ? '' : 's'
+                  }`}
             </span>
           </div>
         </div>
@@ -276,11 +340,11 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
           <button
             type="button"
             className="tracking-usps-link tracking-track-btn"
-            onClick={handleTrack}
-            disabled={count === 0}
-            title={`Open ${urls.length} USPS tracking tab(s), ${USPS_BULK_CHUNK_SIZE} numbers each`}
+            onClick={() => void handleTrack()}
+            disabled={count === 0 || loadingRows}
+            title={`Open ${expectedTabs} USPS tracking tab(s), ${USPS_BULK_CHUNK_SIZE} numbers each`}
           >
-            Track {count} on USPS
+            {loadingRows ? 'Loading…' : `Track ${count} on USPS`}
           </button>
           <button
             type="button"
@@ -294,9 +358,29 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
       <p className="tracking-popup-note">
         {note ?? 'Allow pop-ups for this site if only one tab opens.'}
       </p>
+      {rowsError && (
+        <div className="tracking-page-error" role="alert">
+          Could not load this session&apos;s numbers: {rowsError}
+        </div>
+      )}
 
-      <details className="tracking-details">
+      <details
+        className="tracking-details"
+        open={showLinks}
+        onToggle={(e) => {
+          const open = (e.currentTarget as HTMLDetailsElement).open;
+          setShowLinks(open);
+          if (open && !rows && count > 0) void loadRows();
+        }}
+      >
         <summary>Links &amp; numbers</summary>
+        {loadingRows && <p className="tracking-page-meta">Loading numbers…</p>}
+        {rows && rows.length !== count && (
+          <p className="tracking-page-meta">
+            Loaded {rows.length} number(s); the session count is {count}. Press Reload list if
+            this looks wrong.
+          </p>
+        )}
         <ul className="tracking-chunk-links">
           {urls.map((url, i) => {
             const start = i * USPS_BULK_CHUNK_SIZE + 1;
@@ -316,7 +400,7 @@ function BatchRow({ batch, onRequestDelete }: BatchRowProps) {
           })}
         </ul>
         <ol className="tracking-ol">
-          {batch.rows.map((row) => (
+          {(rows ?? []).map((row) => (
             <li key={row.id ?? row.tracking_number} className="tracking-row">
               <span className="tracking-tn">{row.tracking_number}</span>
               {row.recipient_name ? (
@@ -355,6 +439,20 @@ export default function TrackingPage() {
     };
   }, [reloadKey]);
 
+  // Refetch when the user comes back to this tab (e.g. after uploading in Order Hub in another
+  // tab), so the list never shows a stale snapshot.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') setReloadKey((k) => k + 1);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, []);
+
   const deleteBatch = useCallback(async (batch: TrackingBatchGroup): Promise<string | null> => {
     try {
       const res = await fetch(`/api/tracking-numbers?batch_id=${encodeURIComponent(batch.id)}`, {
@@ -374,7 +472,7 @@ export default function TrackingPage() {
 
   const closeDeleteModal = useCallback(() => setPendingDelete(null), []);
 
-  const totalNumbers = batches.reduce((sum, b) => sum + b.rows.length, 0);
+  const totalNumbers = meta?.numberCount ?? batches.reduce((sum, b) => sum + b.tracking_count, 0);
 
   return (
     <div className="tracking-page">

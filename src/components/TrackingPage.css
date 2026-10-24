@@ -130,6 +130,10 @@
   cursor: not-allowed;
 }
 
+.tracking-batch-empty {
+  opacity: 0.65;
+}
+
 .tracking-reload-btn {
   cursor: pointer;
   font: inherit;
